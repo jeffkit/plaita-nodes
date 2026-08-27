@@ -29,6 +29,7 @@ class CaptureNode(Node):
     - ``cwd``: 工作目录（默认进程 cwd）
     - ``timeout_secs``: 超时秒数，默认 120；超时 kill 进程组后返回 exit_code=124
     - ``env``: 附加环境变量（表达式，求值后 dict 合并进 os.environ）
+    - ``stdin``: 可选，传给子进程的标准输入文本（表达式；长文本走 stdin 避开 ARG_MAX）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时返回 fake 结果不执行
 
     输出：``{"ok", "exit_code", "stdout", "stderr", "dry_run"}``。
@@ -41,21 +42,27 @@ class CaptureNode(Node):
     cwd: Optional[Any] = None
     timeout_secs: int = 120
     env: Optional[Any] = None
+    stdin: Optional[Any] = None
     dry_run: bool = False
 
     def execute(self, execution: Any) -> dict:
         if self.command is None:
             raise CaptureConfigError("capture 节点缺少 command 字段")
-        raw = self.command if isinstance(self.command, list) else [self.command]
-        parts: list[str] = []
-        for element in raw:
-            value = execution.evaluate(element)
-            parts.append(str(value))
-        cmd = shlex.split(" ".join(parts)) if len(parts) == 1 else parts
+        if isinstance(self.command, list):
+            # 混合字面量/表达式的元素列表
+            cmd = [str(execution.evaluate(el)) for el in self.command]
+        else:
+            # 字符串：可能是 "$NODE.x.argv" 这类求值为列表的表达式，或 shlex 字符串
+            value = execution.evaluate(self.command)
+            if isinstance(value, (list, tuple)):
+                cmd = [str(x) for x in value]
+            else:
+                cmd = shlex.split(str(value))
         if not cmd:
             raise CaptureConfigError("capture 命令为空")
 
         cwd = execution.evaluate(self.cwd) if self.cwd else os.getcwd()
+        stdin_text = str(execution.evaluate(self.stdin)) if self.stdin is not None else None
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
         display = " ".join(cmd)
         if dry:
@@ -69,12 +76,13 @@ class CaptureNode(Node):
 
         proc = subprocess.Popen(
             cmd, cwd=str(cwd), env=env, text=True,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         )
         timed_out = False
         try:
-            stdout, stderr = proc.communicate(timeout=self.timeout_secs)
+            stdout, stderr = proc.communicate(input=stdin_text, timeout=self.timeout_secs)
         except subprocess.TimeoutExpired:
             timed_out = True
             try:

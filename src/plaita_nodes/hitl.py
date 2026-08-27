@@ -49,8 +49,9 @@ class HitlNode(Node):
     message: Optional[Any] = None
     images: Optional[Any] = None
     base_url: Optional[Any] = None
-    timeout_secs: int = Field(default=3600)
-    poll_interval: float = Field(default=5.0)
+    timeout_secs: Optional[Any] = Field(default=3600)
+    poll_interval: Optional[Any] = Field(default=5.0)
+    wait_reply: bool = Field(default=True)
     dry_run: bool = False
 
     def execute(self, execution: Any) -> dict:
@@ -58,9 +59,19 @@ class HitlNode(Node):
         images = execution.evaluate(self.images) if self.images is not None else []
         base = (str(execution.evaluate(self.base_url)) if self.base_url
                 else os.environ.get("HITL_URL", "http://127.0.0.1:8081")).rstrip("/")
+        try:
+            timeout_secs = int(execution.evaluate(self.timeout_secs))
+        except (TypeError, ValueError):
+            timeout_secs = 3600
+        try:
+            poll_interval = float(execution.evaluate(self.poll_interval))
+        except (TypeError, ValueError):
+            poll_interval = 5.0
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
 
         if dry:
+            if not self.wait_reply:
+                return {"status": "sent", "replies": [], "session_id": "dryrun", "dry_run": True}
             return {"status": "replied", "replies": ["同意"],
                     "session_id": "dryrun", "dry_run": True}
 
@@ -79,15 +90,20 @@ class HitlNode(Node):
             message += "\n\n⚠️ 封面图发送失败（媒体窗口过期）：请先给 bot 发任意一条消息后说\"重发图\"。"
 
         resp = requests.post(f"{base}/api/send", json={
-            "message": message, "wait_reply": True,
-            "timeout": self.timeout_secs, "upstream": "ilink",
+            "message": message, "wait_reply": self.wait_reply,
+            "timeout": timeout_secs, "upstream": "ilink",
         }, timeout=30)
         payload = resp.json()
         if not payload.get("success"):
             raise HitlError(f"hitl-server 发送失败: {payload.get('error') or payload}")
         session_id = str(payload.get("session_id") or "")
 
-        deadline = time.monotonic() + self.timeout_secs
+        if not self.wait_reply:
+            # 只发不等（如周报推送），对标 hitl.js waitReply:false
+            return {"status": "sent", "replies": [], "session_id": session_id,
+                    "dry_run": False}
+
+        deadline = time.monotonic() + timeout_secs
         status, replies = "timeout", []
         while time.monotonic() < deadline:
             poll = requests.get(f"{base}/api/poll/{session_id}", timeout=15).json()
@@ -104,7 +120,7 @@ class HitlNode(Node):
             if poll_status == "timeout":
                 status = "timeout"
                 break
-            time.sleep(self.poll_interval)
+            time.sleep(poll_interval)
 
         return {"status": status, "replies": replies, "session_id": session_id,
                 "dry_run": False}

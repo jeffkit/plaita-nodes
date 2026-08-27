@@ -1,0 +1,110 @@
+"""HitlAwaitNode —— HITL 确认的**挂起版**（Distributed 模式专用）。
+
+与阻塞版 HitlNode 的分工：
+- ``HitlNode``（Normal 模式）：execute 内轮询到底，进程内阻塞等待；
+- ``HitlAwaitNode``（Distributed 模式）：execute 只发消息拿 session_id 即返回
+  pending，内核随即挂起并快照 context——**等待微信回复期间进程可以崩溃/重启**，
+  由外部 poller 轮询 hitl-server，把回复作为事件（event_type=hitl_reply）发布到
+  EventBus 唤醒恢复。崩溃级恢复闭环见 ADR-2026-08-27 phase 2。
+
+配套 poller：``python -m plaita_nodes.hitl_poller --hitl-url ... --sessions <file>
+--redis-url ...``（轮询各 session，回复到达即向 Redis EventBus 发布事件）。
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, ClassVar, Optional
+
+import requests
+from pydantic import Field
+
+from plaita import Node
+
+from .hitl import HitlError
+
+EVENT_TYPE = "hitl_reply"
+
+
+class HitlAwaitNode(Node):
+    """发确认消息并**挂起等待**外部事件恢复（仅 Distributed 模式）。
+
+    JSON 字段与 HitlNode 一致（message/images/base_url/timeout_secs），另含：
+    - ``poll_after_send``: 语义占位——挂起版自身不轮询，由外部 poller 负责。
+
+    execute：发消息（wait_reply=true）→ ``{status:"pending", session_id, ...}``
+    resume：事件数据 ``{"status":"replied","replies":[...]}`` → 结构化输出；
+            cancel/timeout → 对应状态。
+    输出：``{"status": "replied"|"timeout"|"cancel", "replies", "session_id"}``。
+    """
+
+    node_type: ClassVar[str] = "hitl_await"
+    node_name: ClassVar[str] = "人工确认(挂起)"
+    is_suspending: ClassVar[bool] = True
+
+    message: Optional[Any] = None
+    images: Optional[Any] = None
+    base_url: Optional[Any] = None
+    timeout_secs: Optional[Any] = Field(default=3600)
+    # 内核挂起时据此向 EventBus 注册订阅（poller 发布同型事件唤醒）
+    event_type: str = EVENT_TYPE
+    event_filter: dict = Field(default_factory=dict)
+    dry_run: bool = False
+
+    # ── 内部：消息发送（与 HitlNode 共用语义）─────────────────────
+    def _send(self, message: str, images: list, base: str, timeout_secs: int) -> str:
+        image_failed = False
+        if images:
+            try:
+                probe = requests.post(f"{base}/api/send", json={
+                    "message": "（图片见下）", "images": images,
+                    "wait_reply": False, "upstream": "ilink",
+                }, timeout=15)
+                if not probe.json().get("success"):
+                    image_failed = True
+            except requests.RequestException:
+                image_failed = True
+        if image_failed:
+            message += "\n\n⚠️ 封面图发送失败（媒体窗口过期）：请先给 bot 发任意一条消息后说\"重发图\"。"
+        resp = requests.post(f"{base}/api/send", json={
+            "message": message, "wait_reply": True,
+            "timeout": timeout_secs, "upstream": "ilink",
+        }, timeout=30)
+        payload = resp.json()
+        if not payload.get("success"):
+            raise HitlError(f"hitl-server 发送失败: {payload.get('error') or payload}")
+        return str(payload.get("session_id") or "")
+
+    def execute(self, execution: Any) -> dict:
+        message = str(execution.evaluate(self.message) or "")
+        images = execution.evaluate(self.images) if self.images is not None else []
+        base = (str(execution.evaluate(self.base_url)) if self.base_url
+                else os.environ.get("HITL_URL", "http://127.0.0.1:8081")).rstrip("/")
+        try:
+            timeout_secs = int(execution.evaluate(self.timeout_secs))
+        except (TypeError, ValueError):
+            timeout_secs = 3600
+        dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
+
+        if dry:
+            return {"status": "pending", "session_id": "dryrun",
+                    "replies": [], "dry_run": True}
+        session_id = self._send(message, [str(i) for i in images], base, timeout_secs)
+        # 供外部 poller 定位：session → execution 映射由调用方持久化
+        execution.set_state(f"{execution.express_prefix}HITL_SESSION", session_id)
+        return {"status": "pending", "session_id": session_id,
+                "replies": [], "timeout_secs": timeout_secs}
+
+    def resume(self, execution: Any, resume_type, resume_data=None) -> dict:
+        from plaita.core.errors import ResumeType
+
+        data = resume_data if isinstance(resume_data, dict) else {}
+        if resume_type is ResumeType.CANCEL:
+            return {"status": "cancel", "replies": [],
+                    "session_id": str(data.get("session_id") or "")}
+        if resume_type is ResumeType.TIMEOUT:
+            return {"status": "timeout", "replies": [],
+                    "session_id": str(data.get("session_id") or "")}
+        replies = [str(r) for r in (data.get("replies") or [])]
+        return {"status": str(data.get("status") or "replied"),
+                "replies": replies,
+                "session_id": str(data.get("session_id") or "")}
