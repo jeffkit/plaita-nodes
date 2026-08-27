@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plaita-nodes"
+version = "0.1.0"
+description = "plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Hitl / Notify / WriteFile"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "plaita>=0.5.0",
+    "agentproc>=0.14.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyyaml"]
+
+[project.entry-points."plaita.nodes"]
+agentrun = "plaita_nodes.agent_run:AgentRunNode"
+capture = "plaita_nodes.capture:CaptureNode"
+hitl = "plaita_nodes.hitl:HitlNode"
+notify = "plaita_nodes.notify:NotifyNode"
+writefile = "plaita_nodes.write_file:WriteFileNode"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plaita_nodes"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
