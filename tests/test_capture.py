@@ -40,7 +40,7 @@ def test_dry_run(fake_execution):
 
 
 def test_global_dry_run(fake_execution):
-    from conftest import FakeExecution
+    from fake_exec import FakeExecution
 
     node = CaptureNode(id="t", command=["echo", "hi"])
     out = node.execute(FakeExecution(global_vars={"dry_run": True}))

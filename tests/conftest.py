@@ -1,4 +1,4 @@
-"""测试公共件：最小 NodeExecutionContext 桩 + 配置目录 fixture。"""
+"""测试公共件：配置目录 fixture + 测试执行桩 re-export。"""
 from __future__ import annotations
 
 import json
@@ -6,21 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from fake_exec import FakeExecution  # noqa: F401  # re-export 兼容
 
-class FakeExecution:
-    """满足节点用到的 NodeExecutionContext 窄接口：evaluate / get_global_variable。"""
-
-    express_prefix = "$"
-    context: dict = {}
-
-    def __init__(self, global_vars: dict | None = None):
-        self._globals = global_vars or {}
-
-    def evaluate(self, value):
-        return value
-
-    def get_global_variable(self, key, default=None):
-        return self._globals.get(key, default)
+__all__ = ["FakeExecution", "agent_config_repo", "register_test_echo_executor"]
 
 
 @pytest.fixture

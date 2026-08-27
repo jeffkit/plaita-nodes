@@ -34,7 +34,7 @@ class TestAgentRunNode:
         assert out["cli"] == "recursive"
 
     def test_dry_run_via_global(self, fake_execution):
-        from conftest import FakeExecution
+        from fake_exec import FakeExecution
 
         node = AgentRunNode(id="t", agent="glm-52", prompt="hi")
         out = node.execute(FakeExecution(global_vars={"dry_run": True}))
