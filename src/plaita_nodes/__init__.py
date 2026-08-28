@@ -16,12 +16,13 @@ from .config import (
 from .hitl import HitlError, HitlNode
 from .hitl_await import HitlAwaitNode
 from .llm import LlmError, LlmNode
+from .report import ReportNode, append_entry as report_append, read_entries as report_read
 from .notify import NotifyNode
 from .write_file import WriteFileNode
 
 __version__ = "0.1.0"
 
-_ALL_NODES = [AgentRunNode, CaptureNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, WriteFileNode]
+_ALL_NODES = [AgentRunNode, CaptureNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, ReportNode, WriteFileNode]
 
 
 def register_all() -> None:
@@ -36,7 +37,7 @@ def register_all() -> None:
 __all__ = [
     "AgentRunNode", "AgentRunError", "extract_recursive_result", "register_recursive_direct",
     "CaptureNode", "CaptureConfigError",
-    "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError",
+    "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError", "ReportNode", "report_append", "report_read",
     "NotifyNode",
     "WriteFileNode",
     "register_all",
