@@ -14,15 +14,17 @@ from .config import (
     resolve_provider,
 )
 from .hitl import HitlError, HitlNode
+from .gate import GateNode
 from .hitl_await import HitlAwaitNode
 from .llm import LlmError, LlmNode
-from .report import ReportNode, append_entry as report_append, read_entries as report_read
+from .rate_limit import RateLimitNode
+from .report import ReportNode, report_append, report_read
 from .notify import NotifyNode
 from .write_file import WriteFileNode
 
 __version__ = "0.1.0"
 
-_ALL_NODES = [AgentRunNode, CaptureNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, ReportNode, WriteFileNode]
+_ALL_NODES = [AgentRunNode, CaptureNode, GateNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, WriteFileNode]
 
 
 def register_all() -> None:
