@@ -31,7 +31,7 @@ class TestAgentRunNode:
         out = node.execute(fake_execution)
         assert out["dry_run"] is True
         assert "would run" in out["text"]
-        assert out["cli"] == "recursive"
+        assert "glm-52" in out["text"]  # dry 不解析 profile，cli 即 agent 名
 
     def test_dry_run_via_global(self, fake_execution):
         from fake_exec import FakeExecution

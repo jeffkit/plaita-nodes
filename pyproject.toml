@@ -22,6 +22,7 @@ dev = ["pytest>=8", "pyyaml"]
 agentrun = "plaita_nodes.agent_run:AgentRunNode"
 capture = "plaita_nodes.capture:CaptureNode"
 hitl = "plaita_nodes.hitl:HitlNode"
+llm = "plaita_nodes.llm:LlmNode"
 hitl_await = "plaita_nodes.hitl_await:HitlAwaitNode"
 notify = "plaita_nodes.notify:NotifyNode"
 writefile = "plaita_nodes.write_file:WriteFileNode"

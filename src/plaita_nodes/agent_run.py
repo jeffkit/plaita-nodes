@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from typing import Any, ClassVar, Optional
 
 from pydantic import Field
@@ -142,13 +144,13 @@ class AgentRunNode(Node):
         repo = execution.evaluate(self.repo) if self.repo else None
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
 
-        profile = resolve_agent(agent_name, repo=repo)
-        executor = profile["executor"]
-
         if dry:
             preview = prompt[:80] + ("…" if len(prompt) > 80 else "")
-            return {"text": f"[dry-run] {agent_name}({executor}) would run: {preview}",
-                    "cli": executor, "session_id": "", "usage": None, "dry_run": True}
+            return {"text": f"[dry-run] {agent_name} would run: {preview}",
+                    "cli": agent_name, "session_id": "", "usage": None, "dry_run": True}
+
+        profile = resolve_agent(agent_name, repo=repo)
+        executor = profile["executor"]
 
         from agentproc import EXECUTORS as AP_EXECUTORS
 
@@ -182,3 +184,49 @@ class AgentRunNode(Node):
 
         return {"text": text, "cli": executor, "session_id": result.session_id,
                 "usage": result.usage, "dry_run": False}
+
+
+def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
+                          model: Optional[str] = None,
+                          max_steps: Optional[int] = None,
+                          timeout_secs: int = 1800):
+    """以流式方式跑一轮 recursive Agent（生成器：yield 事件 dict）。
+
+    事件序列：
+        {"type": "line", "text": str}            # agent 原始输出行（宿主可实时展示）
+        {"type": "done", "ok": bool, "result": str, "error": str}
+    供宿主进程（如 plaita-console 的 AI 流程生成）把编码 Agent 作为生成后端复用。
+    """
+    import time as _time
+
+    register_recursive_direct()
+    agent = resolve_agent(profile)
+    env_extra = dict(agent["env"])
+    env_extra.setdefault("RECURSIVE_WORKSPACE", workspace)
+    if model:
+        env_extra["RECURSIVE_MODEL"] = model
+    handlers = _make_recursive_handlers()
+    if agent.get("model"):
+        env_extra.setdefault("RECURSIVE_MODEL", agent["model"])
+    argv = handlers["build_args"](task, "", env_extra)
+    # 子进程必须拿到 provider 凭证 env（否则无凭证运行得到空回复）
+    proc_env = {**os.environ, **env_extra}
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=workspace, env=proc_env)
+    lines: list[str] = []
+    deadline = _time.monotonic() + timeout_secs
+    for line in proc.stdout:  # type: ignore[union-attr]
+        yield {"type": "line", "text": line.rstrip("\n")}
+        lines.append(line)
+    proc.wait()
+    timed_out = _time.monotonic() > deadline
+    stdout = "".join(lines)
+    if timed_out:
+        yield {"type": "done", "ok": False, "result": "", "error": f"agent 超时（>{timeout_secs}s）"}
+        return
+    parsed = extract_recursive_result(stdout)
+    if parsed.get("is_error"):
+        yield {"type": "done", "ok": False, "result": "",
+               "error": f"recursive is_error: {str(parsed.get('result'))[:300]}"}
+        return
+    yield {"type": "done", "ok": True, "result": parsed.get("result") or "", "error": ""}
