@@ -18,7 +18,7 @@ from .gate import GateNode
 from .hitl_await import HitlAwaitNode
 from .llm import LlmError, LlmNode
 from .rate_limit import RateLimitNode
-from .report import ReportNode, report_append, report_read
+from .report import ReportNode, append_entry, read_entries
 from .notify import NotifyNode
 from .write_file import WriteFileNode
 
