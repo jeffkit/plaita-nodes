@@ -8,6 +8,7 @@ import logging
 from typing import Any, ClassVar, Dict, Optional
 
 import requests
+from pydantic import PrivateAttr
 
 from plaita.credentials import get_credential
 from plaita.node.basic import Node
@@ -76,3 +77,40 @@ class SlackWebhookNode(_WebhookNode):
 
     def _payload(self, text: str) -> Dict[str, Any]:
         return {"text": text}
+
+
+class DingtalkWebhookNode(_WebhookNode):
+    """钉钉群机器人：凭据数据为 {"url": "https://oapi.dingtalk.com/robot/send?access_token=...",
+    "secret": "<加签密钥，可选>"}。配置了 secret 时自动加签（timestamp+HMAC-SHA256）。
+    """
+
+    node_type: ClassVar[str] = "dingtalk_webhook"
+    node_name: ClassVar[str] = "钉钉通知"
+
+    _credential_data: Dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    def _endpoint(self) -> str:
+        url = super()._endpoint()
+        secret = self._credential_data.get("secret")
+        if not secret:
+            return url
+        import base64
+        import hashlib
+        import hmac
+        import time
+        import urllib.parse
+
+        ts = str(round(time.time() * 1000))
+        digest = hmac.new(
+            secret.encode(), f"{ts}\n{secret}".encode(), digestmod=hashlib.sha256
+        ).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(digest))
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}timestamp={ts}&sign={sign}"
+
+    def execute(self, execution):
+        self._credential_data = get_credential(self.credential) if self.credential else {}
+        return super().execute(execution)
+
+    def _payload(self, text: str) -> Dict[str, Any]:
+        return {"msgtype": "text", "text": {"content": text}}

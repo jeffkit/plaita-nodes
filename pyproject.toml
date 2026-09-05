@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plaita-nodes"
-version = "0.2.0"
+version = "0.3.0"
 description = "plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Hitl / Notify / WriteFile"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyyaml"]
+sql = ["sqlalchemy>=2.0", "psycopg2-binary>=2.9", "pymysql>=1.1"]
 
 [project.entry-points."plaita.nodes"]
 agentrun = "plaita_nodes.agent_run:AgentRunNode"
@@ -32,6 +33,11 @@ writefile = "plaita_nodes.write_file:WriteFileNode"
 feishu_webhook = "plaita_nodes.webhooks:FeishuWebhookNode"
 wecom_webhook = "plaita_nodes.webhooks:WecomWebhookNode"
 slack_webhook = "plaita_nodes.webhooks:SlackWebhookNode"
+dingtalk_webhook = "plaita_nodes.webhooks:DingtalkWebhookNode"
+generic_webhook = "plaita_nodes.api:GenericWebhookNode"
+api_request = "plaita_nodes.api:ApiRequestNode"
+sql_query = "plaita_nodes.database:SqlQueryNode"
+email_send = "plaita_nodes.email:EmailSendNode"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/plaita_nodes"]

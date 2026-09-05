@@ -4,6 +4,9 @@
 若以源码方式引入（未经 pip 安装），可显式调用 :func:`register_all`。
 """
 from .agent_run import AgentRunError, AgentRunNode, extract_recursive_result, register_recursive_direct
+from .api import ApiRequestNode, GenericWebhookNode
+from .database import SqlQueryNode
+from .email import EmailSendNode
 from .capture import CaptureConfigError, CaptureNode
 from .config import (
     EXECUTOR_ALIASES,
@@ -20,12 +23,12 @@ from .llm import LlmError, LlmNode
 from .rate_limit import RateLimitNode
 from .report import ReportNode, append_entry, read_entries
 from .notify import NotifyNode
-from .webhooks import FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
+from .webhooks import DingtalkWebhookNode, FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
-_ALL_NODES = [AgentRunNode, CaptureNode, FeishuWebhookNode, GateNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, WecomWebhookNode, WriteFileNode]
+_ALL_NODES = [AgentRunNode, ApiRequestNode, CaptureNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
 
 
 def register_all() -> None:
