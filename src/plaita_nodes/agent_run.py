@@ -48,6 +48,12 @@ def _make_recursive_handlers():
 
 
 def register_recursive_direct() -> None:
+    """注册 recursive-direct 执行器到 agentproc。
+
+    agentproc 是可选依赖：只在调用本函数时（``AgentRunNode`` 执行前、
+    或 :func:`recursive_stream_turn`）才 import。不在模块级调用，
+    保证未安装 agentproc 时 ``import plaita_nodes`` 仍然可用。
+    """
     from agentproc import EXECUTORS
 
     if "recursive-direct" not in EXECUTORS:
@@ -59,9 +65,6 @@ def register_recursive_direct() -> None:
             "plain": True,
             "make_handlers": _make_recursive_handlers,
         }
-
-
-register_recursive_direct()
 
 
 def extract_recursive_result(stdout: str) -> dict:
@@ -152,6 +155,8 @@ class AgentRunNode(Node):
         profile = resolve_agent(agent_name, repo=repo)
         executor = profile["executor"]
 
+        # agentproc 延迟到执行时才 import（可选依赖，见 register_recursive_direct）
+        register_recursive_direct()
         from agentproc import EXECUTORS as AP_EXECUTORS
 
         # 显式别名映射优先；否则若 agentproc 已内置同名 executor（或测试桩）直接使用
