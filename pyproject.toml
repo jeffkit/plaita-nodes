@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plaita-nodes"
-version = "0.1.0"
+version = "0.2.0"
 description = "plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Hitl / Notify / WriteFile"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,9 @@ report = "plaita_nodes.report:ReportNode"
 hitl_await = "plaita_nodes.hitl_await:HitlAwaitNode"
 notify = "plaita_nodes.notify:NotifyNode"
 writefile = "plaita_nodes.write_file:WriteFileNode"
+feishu_webhook = "plaita_nodes.webhooks:FeishuWebhookNode"
+wecom_webhook = "plaita_nodes.webhooks:WecomWebhookNode"
+slack_webhook = "plaita_nodes.webhooks:SlackWebhookNode"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/plaita_nodes"]

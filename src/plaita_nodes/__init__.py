@@ -20,11 +20,12 @@ from .llm import LlmError, LlmNode
 from .rate_limit import RateLimitNode
 from .report import ReportNode, append_entry, read_entries
 from .notify import NotifyNode
+from .webhooks import FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-_ALL_NODES = [AgentRunNode, CaptureNode, GateNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, WriteFileNode]
+_ALL_NODES = [AgentRunNode, CaptureNode, FeishuWebhookNode, GateNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, WecomWebhookNode, WriteFileNode]
 
 
 def register_all() -> None:
