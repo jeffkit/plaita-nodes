@@ -25,13 +25,39 @@ from pydantic import Field
 from plaita import Node
 
 try:
-    from .config import resolve_provider
+    from .config import load_merged_config, resolve_provider
 except ImportError:  # 平铺布局兜底
-    from plaita_nodes.config import resolve_provider  # type: ignore[no-redef]
+    from plaita_nodes.config import (  # type: ignore[no-redef]
+        load_merged_config, resolve_provider,
+    )
 
 
 class LlmError(RuntimeError):
     pass
+
+
+def resolve_llm_endpoint(api_base: Optional[str], api_key: Optional[str],
+                         model: Optional[str],
+                         provider_name: Optional[str] = None) -> tuple[str, str, str]:
+    """LLM 端点三级回退：字段显式值 > provider bundle > LLM_* 环境变量，
+    → (api_base, api_key, model)。供 llm / decision 等节点共用。"""
+    if provider_name:
+        try:
+            bundle = resolve_provider(provider_name, load_merged_config("providers"))
+        except Exception as exc:  # noqa: BLE001
+            raise LlmError(f"provider '{provider_name}' 解析失败: {exc}") from exc
+        api_base = api_base or bundle.get("apiBase")
+        api_key = api_key or bundle.get("apiKey")
+        model = model or bundle.get("model")
+
+    api_base = api_base or os.environ.get("LLM_API_BASE", "")
+    api_key = api_key or os.environ.get("LLM_API_KEY", "")
+    model = model or os.environ.get("LLM_MODEL", "")
+    if not (api_base and api_key and model):
+        raise LlmError(
+            "LLM 端点不完整：需要 api_base/api_key/model（字段、provider 或 "
+            "LLM_API_BASE/LLM_API_KEY/LLM_MODEL 环境变量）")
+    return str(api_base).rstrip("/"), str(api_key), str(model)
 
 
 class LlmNode(Node):
@@ -65,30 +91,10 @@ class LlmNode(Node):
     dry_run: bool = False
 
     def _resolve_endpoint(self, execution: Any) -> tuple[str, str, str]:
-        """→ (api_base, api_key, model)。字段显式值 > provider bundle > LLM_* env。"""
         ev = lambda v: execution.evaluate(v) if v is not None else None  # noqa: E731
-        api_base = ev(self.api_base)
-        api_key = ev(self.api_key)
-        model = ev(self.model)
-        provider_name = ev(self.provider) if self.provider is not None else None
-
-        if provider_name:
-            try:
-                bundle = resolve_provider(str(provider_name))
-            except Exception as exc:  # noqa: BLE001
-                raise LlmError(f"provider '{provider_name}' 解析失败: {exc}") from exc
-            api_base = api_base or bundle.get("apiBase")
-            api_key = api_key or bundle.get("apiKey")
-            model = model or bundle.get("model")
-
-        api_base = api_base or os.environ.get("LLM_API_BASE", "")
-        api_key = api_key or os.environ.get("LLM_API_KEY", "")
-        model = model or os.environ.get("LLM_MODEL", "")
-        if not (api_base and api_key and model):
-            raise LlmError(
-                "LLM 端点不完整：需要 api_base/api_key/model（字段、provider 或 "
-                "LLM_API_BASE/LLM_API_KEY/LLM_MODEL 环境变量）")
-        return str(api_base).rstrip("/"), str(api_key), str(model)
+        return resolve_llm_endpoint(
+            ev(self.api_base), ev(self.api_key), ev(self.model),
+            ev(self.provider) if self.provider is not None else None)
 
     def execute(self, execution: Any) -> dict:
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))

@@ -1,6 +1,6 @@
 # AGENTS.md — plaita-nodes
 
-> plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Hitl / Notify / WriteFile。
+> plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Decision / Hitl / Notify / WriteFile。
 > 大仓 ADR-2026-08-27（编排收敛 plaita + agentproc）的节点承载层。
 
 ## 项目概述
@@ -19,6 +19,8 @@ agents/providers 配置，执行走 agentproc Python SDK）、本地命令、微
 
 关键路径：
 - `src/plaita_nodes/config.py` — agents/providers 加载（flowcast 搜索顺序 + 深合并 + `${VAR}` 插值 + provider→env 翻译）
+- `src/plaita_nodes/llm.py` — LlmNode + `resolve_llm_endpoint`（端点三级回退：字段 > provider bundle > LLM_* env，供 decision 复用）
+- `src/plaita_nodes/decision.py` — DecisionNode + `DECISION_PROVIDERS` 注册表（`llm` / `jev` 过渡契约 / 自定义注册）
 - `src/plaita_nodes/agent_run.py` — AgentRunNode + `recursive-direct` executor（语义 = flowcast runRecursiveDirect）
 - `pyproject.toml` — `[project.entry-points."plaita.nodes"]` 注册表
 

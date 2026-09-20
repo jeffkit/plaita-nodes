@@ -6,6 +6,7 @@
 from .agent_run import AgentRunError, AgentRunNode, extract_recursive_result, register_recursive_direct
 from .api import ApiRequestNode, GenericWebhookNode
 from .database import SqlQueryNode
+from .decision import DECISION_PROVIDERS, DecisionError, DecisionNode, register_decision_provider
 from .email import EmailSendNode
 from .capture import CaptureConfigError, CaptureNode
 from .config import (
@@ -26,9 +27,9 @@ from .notify import NotifyNode
 from .webhooks import DingtalkWebhookNode, FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
-_ALL_NODES = [AgentRunNode, ApiRequestNode, CaptureNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
+_ALL_NODES = [AgentRunNode, ApiRequestNode, CaptureNode, DecisionNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
 
 
 def register_all() -> None:
@@ -43,7 +44,9 @@ def register_all() -> None:
 __all__ = [
     "AgentRunNode", "AgentRunError", "extract_recursive_result", "register_recursive_direct",
     "CaptureNode", "CaptureConfigError",
-    "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError", "ReportNode", "report_append", "report_read",
+    "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError",
+    "DecisionNode", "DecisionError", "register_decision_provider", "DECISION_PROVIDERS",
+    "ReportNode", "report_append", "report_read",
     "NotifyNode",
     "WriteFileNode",
     "register_all",

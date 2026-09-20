@@ -11,6 +11,7 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 |------|------|------|
 | `agentrun` | Agent 运行 | **Agent 原子**：多步工具循环（模型可调工具自主多轮）。经 [agentproc](../agentproc) 调用 Agent CLI（recursive / claude）；配置复用 flowcast 的 `agents.json` / `providers.json` |
 | `llm` | LLM 补全 | **LLM 原子**：单次 chat/completions 生成文本（OpenAI 兼容端点）。与 agentrun 的边界见下 |
+| `decision` | 结构化决策 | **决策原子**：封闭决策空间 → 类型化选择 + 置信度（provider 可插拔：`llm` / `jev` / 自定义注册）；低于阈值可标记/走默认项/抛错升级 HITL |
 | `capture` | 命令执行 | 跑本地命令捕获输出；失败不抛错（`exit_code` 返回，流程自行分支） |
 | `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 轮询回复 |
 | `notify` | 通知 | terminal 后端（stdout） |
@@ -26,6 +27,10 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 - **Agent ≠ LLM**：`agentrun` 是多步工具循环的 Agent 原子（重）；`llm` 是单次
   补全的 LLM 原子（轻）。流程里"摘要/改写/抽取/分类"用 `llm`，"多步编码/
   工具任务"用 `agentrun`。
+- **决策 ≠ 生成**：`decision` 是单步、封闭决策空间的判断原子（路由/分类/
+  打分），输出类型化决策 + 置信度，choice 必落在决策空间内；开放文本生成
+  归 `llm`。理念对标 System One 决策模型（如 TypeSafe Jev）——流程里
+  "该走哪个分支"用 `decision`，"写一段话"用 `llm`。
 - 纯文本变换（判决提取、frontmatter 解析等）**不做节点**——注册为表达式
   `F.*` 函数（`ExpressionRegistry.register`），在 assignment 里一行使用。
 - 业务领域的状态机（如内容池销账）属于业务仓，不放本仓。
