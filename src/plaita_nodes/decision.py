@@ -13,9 +13,11 @@ provider 注册表 ``DECISION_PROVIDERS``（仿 agentproc EXECUTORS，开放注�
 - ``"llm"``：OpenAI 兼容 /chat/completions（json_mode + 约束提示词，
   temperature 固定 0）。端点解析与 LlmNode 同链：字段显式值 > provider
   bundle > LLM_API_BASE/LLM_API_KEY/LLM_MODEL 环境变量；
-- ``"jev"``：TypeSafe Jev 决策模型。公开 API 形态仍在演进，按
-  ``POST {JEV_API_BASE}/v1/decisions`` 过渡契约实现（body: question /
-  choices / input → {choice, confidence}），正式 API 定型后只改本文件；
+- ``"jev"``：Jev 线协议（``POST {base}/v1/systemone``）。官方 TypeSafe Jev
+  与开源替代 OpenJev 同说这套协议（state + choice 型 question 的 criteria
+  决策空间 → answers 里取 {choice, probabilities, confidence}）；端点由
+  ``api_base`` 字段或 ``JEV_API_BASE`` 环境变量给出（官方 early-access API
+  或自托管 OpenJev 均可）；
 - 自定义：``register_decision_provider(name, fn)``，``fn(**request)`` 返回
   ``{"choice", "confidence", "model", "raw"}``（测试与确定性流程用）。
 
@@ -150,26 +152,43 @@ def _provider_llm(*, question: Any, choices: list[dict], input: Any,
 def _provider_jev(*, question: Any, choices: list[dict], input: Any,
                   api_base: Optional[str], api_key: Optional[str],
                   model: Optional[str], timeout_secs: int) -> dict:
+    """Jev 线协议：POST {base}/v1/systemone。
+
+    state = 待判定内容；单个 choice 型 question，criteria 即决策空间。
+    官方 TypeSafe Jev（early access）与自托管 OpenJev 同说这套协议。
+    """
     base = str(api_base or os.environ.get("JEV_API_BASE", "")).rstrip("/")
     if not base:
         raise DecisionError("jev provider 需要 api_base 字段或 JEV_API_BASE 环境变量")
     key = str(api_key or os.environ.get("JEV_API_KEY", ""))
-    body: dict = {"question": question or "", "choices": choices, "input": input}
+    body: dict = {
+        "state": _render_payload(input),
+        "questions": {"decision": {
+            "type": "choice",
+            "instructions": str(question or "Choose the best option."),
+            "criteria": {c["value"]: (c["description"] or c["value"]) for c in choices},
+        }},
+    }
     if model:
         body["model"] = str(model)
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    resp = requests.post(f"{base}/v1/decisions", headers=headers, json=body,
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    resp = requests.post(f"{base}/v1/systemone", headers=headers, json=body,
                          timeout=timeout_secs)
     if resp.status_code >= 400:
-        raise DecisionError(f"Jev 请求失败 {resp.status_code}: {resp.text[:300]}")
+        raise DecisionError(f"systemone 请求失败 {resp.status_code}: {resp.text[:300]}")
     data = resp.json()
-    if not isinstance(data, dict) or "choice" not in data:
-        raise DecisionError(f"Jev 响应缺少 choice 字段: {str(data)[:200]}")
+    if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
+        raise DecisionError(f"systemone 响应缺少 answers 对象: {str(data)[:200]}")
+    answer = data["answers"].get("decision")
+    if not isinstance(answer, dict) or "choice" not in answer:
+        raise DecisionError(f"systemone answers.decision 缺少 choice: {str(data)[:200]}")
     try:
-        confidence = float(data.get("confidence", 0.0))
+        confidence = float(answer.get("confidence", 0.0))
     except (TypeError, ValueError) as exc:
-        raise DecisionError(f"Jev confidence 非数值: {data.get('confidence')!r}") from exc
-    return {"choice": str(data["choice"]), "confidence": confidence,
+        raise DecisionError(f"confidence 非数值: {answer.get('confidence')!r}") from exc
+    return {"choice": str(answer["choice"]), "confidence": confidence,
             "model": data.get("model"),
             "raw": json.dumps(data, ensure_ascii=False)[:2000]}
 

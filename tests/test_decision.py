@@ -57,7 +57,7 @@ class StubOpenAIDecision:
 
 
 class StubJev:
-    """Jev 过渡契约端点：POST /v1/decisions → {choice, confidence}。"""
+    """Jev/OpenJev 线协议端点：POST /v1/systemone。"""
 
     def __init__(self, choice: str = "route_a", confidence: float = 0.9):
         self.choice = choice
@@ -70,9 +70,15 @@ class StubJev:
             def do_POST(self):
                 outer.auth = self.headers.get("Authorization", "")
                 outer.last_body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                data = json.dumps({"choice": outer.choice,
-                                   "confidence": outer.confidence,
-                                   "model": "jev-1"}).encode()
+                data = json.dumps({
+                    "model": "openjev-0.1",
+                    "answers": {"decision": {
+                        "choice": outer.choice,
+                        "probabilities": {outer.choice: outer.confidence},
+                        "confidence": outer.confidence,
+                    }},
+                    "usage": {"input_tokens": 11},
+                }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -181,15 +187,19 @@ def test_jev_provider(jev_stub):
     node = DecisionNode(id="t", question="路由到哪个队列", provider="jev",
                         choices=[{"value": "route_a", "description": "普通队列"},
                                  {"value": "route_b"}],
-                        input={"text": "工单内容"}, model="jev-1")
+                        input={"text": "工单内容"}, model="jev-latest")
     out = node.execute(FakeExecution())
     assert out["choice"] == "route_a"
     assert out["confidence"] == 0.9
-    assert out["model"] == "jev-1"
+    assert out["model"] == "openjev-0.1"
     assert out["provider"] == "jev"
     assert jev_stub.auth == "Bearer jev-secret"
-    assert jev_stub.last_body["question"] == "路由到哪个队列"
-    assert {"value": "route_b", "description": None} in jev_stub.last_body["choices"]
+    q = jev_stub.last_body["questions"]["decision"]
+    assert q["type"] == "choice"
+    assert q["instructions"] == "路由到哪个队列"
+    assert q["criteria"] == {"route_a": "普通队列", "route_b": "route_b"}
+    assert "工单内容" in jev_stub.last_body["state"]
+    assert jev_stub.last_body["model"] == "jev-latest"
 
 
 def test_jev_provider_requires_endpoint(monkeypatch):
