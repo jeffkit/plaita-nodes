@@ -225,6 +225,30 @@ def test_custom_provider_registration(openai_stub):
         DECISION_PROVIDERS.pop("static", None)
 
 
+def test_jevlike_requires_model_path():
+    node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="jevlike")
+    with pytest.raises(DecisionError, match="checkpoint"):
+        node.execute(FakeExecution())
+
+
+def test_jevlike_missing_package(monkeypatch):
+    # torch 缺失（sys.modules 置 None 强制 import 失败）→ 守卫给出安装提示
+    monkeypatch.setitem(__import__("sys").modules, "torch", None)
+    node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="jevlike",
+                        model="/nonexistent.pt")
+    with pytest.raises(DecisionError, match="jevlike \+ torch"):
+        node.execute(FakeExecution())
+
+
+def test_jevlike_checkpoint_missing():
+    pytest.importorskip("torch")
+    pytest.importorskip("jevlike")
+    node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="jevlike",
+                        model="/nonexistent.pt")
+    with pytest.raises(DecisionError, match="checkpoint 不存在"):
+        node.execute(FakeExecution())
+
+
 def test_unknown_provider():
     node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="nope")
     with pytest.raises(DecisionError, match="未注册"):

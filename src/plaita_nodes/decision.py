@@ -19,7 +19,10 @@ provider 注册表 ``DECISION_PROVIDERS``（仿 agentproc EXECUTORS，开放注�
   ``api_base`` 字段或 ``JEV_API_BASE`` 环境变量给出（官方 early-access API
   或自托管 OpenJev 均可）；
 - 自定义：``register_decision_provider(name, fn)``，``fn(**request)`` 返回
-  ``{"choice", "confidence", "model", "raw"}``（测试与确定性流程用）。
+  ``{"choice", "confidence", "model", "raw"}``（测试与确定性流程用）；
+- ``"jevlike"``：本地打分器（开源替代，jevlike 仓，MIT）。``model`` 字段 =
+  checkpoint 路径；torch/jevlike 懒加载（缺包时给出安装提示，不影响其他
+  provider），checkpoint 按路径缓存避免每步重载。
 
 输出：``{"choice", "confidence", "provider", "model", "low_confidence",
 "raw", "dry_run"}``。``low_confidence`` 如实记录是否低于 ``min_confidence``
@@ -30,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
 import requests
@@ -194,9 +198,65 @@ def _provider_jev(*, question: Any, choices: list[dict], input: Any,
 
 
 DecisionProvider = Callable[..., dict]
+
+# jevlike checkpoint 缓存：{resolved_path: (model, collator, device)}
+_JEVLIKE_CACHE: dict[str, tuple] = {}
+
+
+def _provider_jevlike(*, question: Any, choices: list[dict], input: Any,
+                      api_base: Optional[str], api_key: Optional[str],
+                      model: Optional[str], timeout_secs: int) -> dict:
+    """本地 jevlike 打分器（https://github.com/vinnylarouge/jevlike，MIT）。
+
+    ``model`` 字段 = checkpoint 路径（jevlike 仓训练产物，如
+    ``jevlike-train … --output runs/x.pt``）。单次前向传播给每个选项打分，
+    无文本生成。torch/jevlike 懒加载：未安装时抛带安装提示的 DecisionError，
+    不影响 llm/jev provider。
+    """
+    if not model:
+        raise DecisionError("jevlike provider 需要 model 字段指向 checkpoint 路径")
+    try:
+        import torch
+        from jevlike.data import ChoiceExample
+        from jevlike.model import load_checkpoint, select_device
+        from jevlike.train import move
+    except ImportError as exc:
+        raise DecisionError(
+            "jevlike provider 需要 jevlike + torch"
+            "（git clone https://github.com/vinnylarouge/jevlike && pip install -e jevlike）"
+        ) from exc
+
+    checkpoint = Path(str(model)).expanduser().resolve()
+    if not checkpoint.is_file():
+        raise DecisionError(f"jevlike checkpoint 不存在: {checkpoint}")
+    cache_key = f"{checkpoint}:{select_device('auto')}"
+    cached = _JEVLIKE_CACHE.get(cache_key)
+    if cached is None:
+        device = select_device("auto")
+        net, collator, _ = load_checkpoint(checkpoint, device)  # 第三项为 checkpoint 元数据，弃用
+        cached = (net, collator, device)
+        _JEVLIKE_CACHE[cache_key] = cached
+    net, collator, device = cached
+
+    state = _render_payload(input)
+    if question:
+        state = f"{question}\n{state}"
+    batch = move(collator([ChoiceExample(state, tuple(c["value"] for c in choices), 0)]),
+                 device)
+    net.eval()
+    with torch.no_grad():
+        probs = net(batch).softmax(-1)[0, :len(choices)].cpu().tolist()
+    best = max(range(len(choices)), key=lambda i: probs[i])
+    return {"choice": choices[best]["value"], "confidence": float(probs[best]),
+            "model": checkpoint.name,
+            "raw": json.dumps({c["value"]: round(p, 4) for c, p in zip(choices, probs)},
+                              ensure_ascii=False)}
+
+
 DECISION_PROVIDERS: dict[str, DecisionProvider] = {
     "llm": _provider_llm,
     "jev": _provider_jev,
+    "jevlike": _provider_jevlike,
 }
 
 
