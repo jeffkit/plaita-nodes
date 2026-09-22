@@ -110,24 +110,45 @@ def _extract_json(text: str) -> dict:
     raise DecisionError(f"LLM 未返回 JSON 决策对象: {text[:200]}")
 
 
-# ---- 内置 provider：签名 (question, choices, input, api_base, api_key, model, timeout_secs) ----
+# ---- 内置 provider：签名 (question, choices, input, items, api_base, api_key, model, timeout_secs)
+#      items 非 None 时为批量模式（input 置 None），单次调用返回 results 列表 ----
 
-def _provider_llm(*, question: Any, choices: list[dict], input: Any,
+_LLM_SYSTEM_SINGLE = (
+    '你是结构化决策引擎。只输出一个 JSON 对象，格式 '
+    '{"choice": "<决策，必须是候选之一>", "confidence": <0到1的小数>}，'
+    "不要输出任何其他文字。"
+)
+_LLM_SYSTEM_BATCH = (
+    '你是结构化决策引擎。输入是待判定条目列表（[i] 前缀为序号）。'
+    '只输出一个 JSON 对象，格式 {"results": [{"index": <序号>, '
+    '"choice": "<决策，必须是候选之一>", "confidence": <0到1的小数>}, ...]}，'
+    "每个条目一条、不得遗漏，不要输出任何其他文字。"
+)
+
+
+def _provider_llm(*, question: Any, choices: list[dict], input: Any, items: Optional[list],
                   api_base: Optional[str], api_key: Optional[str],
                   model: Optional[str], timeout_secs: int) -> dict:
     base, key, resolved_model = resolve_llm_endpoint(api_base, api_key, model)
     lines = [f"- {c['value']}" + (f"：{c['description']}" if c["description"] else "")
              for c in choices]
-    messages = [
-        {"role": "system",
-         "content": ('你是结构化决策引擎。只输出一个 JSON 对象，格式 '
-                     '{"choice": "<决策，必须是候选之一>", "confidence": <0到1的小数>}，'
-                     "不要输出任何其他文字。")},
-        {"role": "user",
-         "content": (f"## 判定问题\n{question or '（未提供，按内容直接判定）'}\n\n"
-                     f"## 候选决策\n" + "\n".join(lines) + "\n\n"
-                     f"## 待判定内容\n{_render_payload(input)}")},
-    ]
+    if items is not None:
+        listing = "\n".join(f"[{i}] {_render_payload(it)}" for i, it in enumerate(items))
+        messages = [
+            {"role": "system", "content": _LLM_SYSTEM_BATCH},
+            {"role": "user",
+             "content": (f"## 判定问题\n{question or '（未提供，按内容直接判定）'}\n\n"
+                         f"## 候选决策\n" + "\n".join(lines) + "\n\n"
+                         f"## 待判定列表\n{listing}")},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": _LLM_SYSTEM_SINGLE},
+            {"role": "user",
+             "content": (f"## 判定问题\n{question or '（未提供，按内容直接判定）'}\n\n"
+                         f"## 候选决策\n" + "\n".join(lines) + "\n\n"
+                         f"## 待判定内容\n{_render_payload(input)}")},
+        ]
     resp = requests.post(f"{base}/chat/completions",
                          headers={"Authorization": f"Bearer {key}"},
                          json={"model": resolved_model, "messages": messages,
@@ -142,37 +163,59 @@ def _provider_llm(*, question: Any, choices: list[dict], input: Any,
         raise DecisionError(f"LLM 响应缺少 choices[].message.content: {resp.text[:200]}") from exc
     space = {c["value"] for c in choices}
     data = _extract_json(text)
-    choice = str(data.get("choice", "")).strip()
-    if choice not in space:
-        raise DecisionError(f"LLM 返回的 choice {choice!r} 不在决策空间内: {sorted(space)}")
-    try:
-        confidence = float(data.get("confidence", 0.0))
-    except (TypeError, ValueError) as exc:
-        raise DecisionError(f"confidence 非数值: {data.get('confidence')!r}") from exc
-    return {"choice": choice, "confidence": max(0.0, min(1.0, confidence)),
+
+    def _one(entry: dict) -> tuple[str, float]:
+        choice = str(entry.get("choice", "")).strip()
+        if choice not in space:
+            raise DecisionError(f"LLM 返回的 choice {choice!r} 不在决策空间内: {sorted(space)}")
+        try:
+            return choice, max(0.0, min(1.0, float(entry.get("confidence", 0.0))))
+        except (TypeError, ValueError) as exc:
+            raise DecisionError(f"confidence 非数值: {entry.get('confidence')!r}") from exc
+
+    if items is not None:
+        entries = data.get("results")
+        if not isinstance(entries, list) or len(entries) != len(items):
+            raise DecisionError(
+                f"LLM 批量结果数不符：期望 {len(items)} 条，实际 {str(entries)[:120]}")
+        results = []
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise DecisionError(f"批量结果第 {i} 条不是对象: {str(entry)[:80]}")
+            choice, confidence = _one(entry)
+            results.append({"index": i, "choice": choice, "confidence": confidence})
+        return {"results": results, "model": resolved_model, "raw": text[:2000]}
+
+    choice, confidence = _one(data)
+    return {"choice": choice, "confidence": confidence,
             "model": resolved_model, "raw": text[:2000]}
 
 
-def _provider_jev(*, question: Any, choices: list[dict], input: Any,
+def _provider_jev(*, question: Any, choices: list[dict], input: Any, items: Optional[list],
                   api_base: Optional[str], api_key: Optional[str],
                   model: Optional[str], timeout_secs: int) -> dict:
     """Jev 线协议：POST {base}/v1/systemone。
 
-    state = 待判定内容；单个 choice 型 question，criteria 即决策空间。
+    state = 待判定内容；choice 型 question，criteria 即决策空间。
+    批量模式：每条待判定内容一个 question（item_0…item_N），一次提交。
     官方 TypeSafe Jev（early access）与自托管 OpenJev 同说这套协议。
     """
     base = str(api_base or os.environ.get("JEV_API_BASE", "")).rstrip("/")
     if not base:
         raise DecisionError("jev provider 需要 api_base 字段或 JEV_API_BASE 环境变量")
     key = str(api_key or os.environ.get("JEV_API_KEY", ""))
-    body: dict = {
-        "state": _render_payload(input),
-        "questions": {"decision": {
-            "type": "choice",
-            "instructions": str(question or "Choose the best option."),
-            "criteria": {c["value"]: (c["description"] or c["value"]) for c in choices},
-        }},
-    }
+    criteria = {c["value"]: (c["description"] or c["value"]) for c in choices}
+    instructions = str(question or "Choose the best option.")
+    body: dict = {"questions": {}}
+    if items is not None:
+        for i, it in enumerate(items):
+            body["questions"][f"item_{i}"] = {"type": "choice", "instructions": instructions,
+                                              "criteria": criteria}
+        body["state"] = "\n".join(_render_payload(it) for it in items)
+    else:
+        body["state"] = _render_payload(input)
+        body["questions"]["decision"] = {"type": "choice", "instructions": instructions,
+                                         "criteria": criteria}
     if model:
         body["model"] = str(model)
     headers = {"Content-Type": "application/json"}
@@ -185,14 +228,27 @@ def _provider_jev(*, question: Any, choices: list[dict], input: Any,
     data = resp.json()
     if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
         raise DecisionError(f"systemone 响应缺少 answers 对象: {str(data)[:200]}")
-    answer = data["answers"].get("decision")
-    if not isinstance(answer, dict) or "choice" not in answer:
-        raise DecisionError(f"systemone answers.decision 缺少 choice: {str(data)[:200]}")
-    try:
-        confidence = float(answer.get("confidence", 0.0))
-    except (TypeError, ValueError) as exc:
-        raise DecisionError(f"confidence 非数值: {answer.get('confidence')!r}") from exc
-    return {"choice": str(answer["choice"]), "confidence": confidence,
+
+    def _answer(name: str) -> dict:
+        answer = data["answers"].get(name)
+        if not isinstance(answer, dict) or "choice" not in answer:
+            raise DecisionError(f"systemone answers.{name} 缺少 choice: {str(data)[:200]}")
+        try:
+            confidence = float(answer.get("confidence", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise DecisionError(f"confidence 非数值: {answer.get('confidence')!r}") from exc
+        return {"choice": str(answer["choice"]), "confidence": confidence}
+
+    if items is not None:
+        results = []
+        for i in range(len(items)):
+            a = _answer(f"item_{i}")
+            results.append({"index": i, "choice": a["choice"], "confidence": a["confidence"]})
+        return {"results": results, "model": data.get("model"),
+                "raw": json.dumps(data, ensure_ascii=False)[:2000]}
+
+    a = _answer("decision")
+    return {"choice": a["choice"], "confidence": a["confidence"],
             "model": data.get("model"),
             "raw": json.dumps(data, ensure_ascii=False)[:2000]}
 
@@ -203,7 +259,7 @@ DecisionProvider = Callable[..., dict]
 _JEVLIKE_CACHE: dict[str, tuple] = {}
 
 
-def _provider_jevlike(*, question: Any, choices: list[dict], input: Any,
+def _provider_jevlike(*, question: Any, choices: list[dict], input: Any, items: Optional[list],
                       api_base: Optional[str], api_key: Optional[str],
                       model: Optional[str], timeout_secs: int) -> dict:
     """本地 jevlike 打分器（https://github.com/vinnylarouge/jevlike，MIT）。
@@ -211,7 +267,7 @@ def _provider_jevlike(*, question: Any, choices: list[dict], input: Any,
     ``model`` 字段 = checkpoint 路径（jevlike 仓训练产物，如
     ``jevlike-train … --output runs/x.pt``）。单次前向传播给每个选项打分，
     无文本生成。torch/jevlike 懒加载：未安装时抛带安装提示的 DecisionError，
-    不影响 llm/jev provider。
+    不影响 llm/jev provider。批量模式：一次前向，逐行 softmax。
     """
     if not model:
         raise DecisionError("jevlike provider 需要 model 字段指向 checkpoint 路径")
@@ -238,18 +294,32 @@ def _provider_jevlike(*, question: Any, choices: list[dict], input: Any,
         _JEVLIKE_CACHE[cache_key] = cached
     net, collator, device = cached
 
-    state = _render_payload(input)
-    if question:
-        state = f"{question}\n{state}"
-    batch = move(collator([ChoiceExample(state, tuple(c["value"] for c in choices), 0)]),
-                 device)
+    prefix = f"{question}\n" if question else ""
+    states = items if items is not None else [input]
+    examples = [ChoiceExample(prefix + _render_payload(s),
+                              tuple(c["value"] for c in choices), 0) for s in states]
+    batch = move(collator(examples), device)
     net.eval()
     with torch.no_grad():
-        probs = net(batch).softmax(-1)[0, :len(choices)].cpu().tolist()
-    best = max(range(len(choices)), key=lambda i: probs[i])
-    return {"choice": choices[best]["value"], "confidence": float(probs[best]),
+        probs = net(batch).softmax(-1).cpu().tolist()
+    probs = probs[:len(states)]
+
+    def _one(p: list) -> tuple[str, float]:
+        best = max(range(len(choices)), key=lambda i: p[i])
+        return choices[best]["value"], float(p[best])
+
+    if items is not None:
+        results = []
+        for i, p in enumerate(probs):
+            choice, confidence = _one(p)
+            results.append({"index": i, "choice": choice, "confidence": confidence})
+        return {"results": results, "model": checkpoint.name,
+                "raw": json.dumps([[round(x, 4) for x in p] for p in probs])}
+
+    choice, confidence = _one(probs[0])
+    return {"choice": choice, "confidence": confidence,
             "model": checkpoint.name,
-            "raw": json.dumps({c["value"]: round(p, 4) for c, p in zip(choices, probs)},
+            "raw": json.dumps({c["value"]: round(x, 4) for c, x in zip(choices, probs[0])},
                               ensure_ascii=False)}
 
 
@@ -268,20 +338,30 @@ def register_decision_provider(name: str, fn: DecisionProvider) -> None:
 class DecisionNode(Node):
     """封闭决策空间内的单步判定，返回类型化选择 + 置信度。
 
+    单条模式：``input`` 一个待判定内容 → 输出 ``{choice, confidence, ...}``。
+    批量模式：``items`` 一个待判定内容列表（对同一 ``question``/``choices``
+    逐项判定，provider 单次调用完成）→ 输出 ``{results: [{index, choice,
+    confidence, low_confidence}, ...], low_confidence(任一), ...}``。适合
+    快照剪枝/批量预筛这类"一批对象各判一次"的场景，省掉逐条循环的调用开销。
+
     JSON 字段：
     - ``question``: 判定问题（如"这条短信是否垃圾短信"）
     - ``choices``: 决策空间——字符串列表 / [{value, description}] / {值: 说明} 映射
-    - ``input``: 待判定内容（文本或对象）
-    - ``provider``: ``llm``（默认）/ ``jev`` / 自定义注册名
-    - ``api_base`` / ``api_key`` / ``model``: 端点覆盖（llm/jev 共用；
-      llm 端点另有 provider bundle 与 LLM_* 环境变量回退）
-    - ``min_confidence``: 置信阈值；低于时 ``low_confidence=True`` 并按
-      ``on_low_confidence`` 处理：``passthrough``（默认，仅标记）/
-      ``default``（取 ``default_choice``）/ ``error``（抛错，交由容错策略）
+    - ``input``: 待判定内容（文本或对象）；与 ``items`` 二选一
+    - ``items``: 待判定内容列表（批量模式）
+    - ``provider``: ``llm``（默认）/ ``jev`` / ``jevlike`` / 自定义注册名
+    - ``api_base`` / ``api_key`` / ``model``: 端点覆盖（llm 端点另有 provider
+      bundle 与 LLM_* 环境变量回退；jev 端点另有 JEV_API_BASE/KEY；
+      jevlike 的 model = checkpoint 路径）
+    - ``min_confidence``: 置信阈值（批量模式逐项生效）；低于时该项
+      ``low_confidence=True`` 并按 ``on_low_confidence`` 处理：
+      ``passthrough``（默认，仅标记）/ ``default``（取 ``default_choice``）/
+      ``error``（抛错，交由容错策略）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时不请求，返回首选项
 
-    输出：``{"choice", "confidence", "provider", "model", "low_confidence",
-    "raw", "dry_run"}``。
+    输出：单条 ``{"choice", "confidence", "provider", "model",
+    "low_confidence", "raw", "dry_run"}``；批量 ``{"results", "provider",
+    "model", "low_confidence", "raw", "dry_run"}``。
     """
 
     node_type: ClassVar[str] = "decision"
@@ -290,6 +370,7 @@ class DecisionNode(Node):
     question: Optional[Any] = None
     choices: Optional[Any] = None
     input: Optional[Any] = None
+    items: Optional[Any] = None
     provider: Optional[Any] = None
     api_base: Optional[Any] = None
     api_key: Optional[Any] = None
@@ -318,6 +399,11 @@ class DecisionNode(Node):
         choices = _normalize_choices(execution.evaluate(self.choices))
         provider_name = str(execution.evaluate(self.provider) or "llm")
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
+        ev = lambda v: execution.evaluate(v) if v is not None else None  # noqa: E731
+
+        if self.items is not None:
+            return self._execute_batch(execution, choices, provider_name, dry, ev)
+
         if dry:
             return {"choice": choices[0]["value"], "confidence": 1.0,
                     "provider": provider_name, "model": "",
@@ -327,32 +413,90 @@ class DecisionNode(Node):
         if fn is None:
             raise DecisionError(f"decision provider {provider_name!r} 未注册"
                                 f"（已注册：{sorted(DECISION_PROVIDERS)}）")
-        ev = lambda v: execution.evaluate(v) if v is not None else None  # noqa: E731
         out = fn(question=ev(self.question),
                  choices=choices,
                  input=ev(self.input),
+                 items=None,
                  api_base=ev(self.api_base),
                  api_key=ev(self.api_key),
                  model=ev(self.model),
                  timeout_secs=self.timeout_secs)
 
-        choice = str(out.get("choice", ""))
-        if choice not in {c["value"] for c in choices}:
-            raise DecisionError(f"provider 返回的 choice {choice!r} 不在决策空间内")
-        try:
-            confidence = float(out.get("confidence", 0.0))
-        except (TypeError, ValueError) as exc:
-            raise DecisionError(f"provider 返回的 confidence 非数值: {out.get('confidence')!r}") from exc
+        choice, confidence = self._checked(out, choices)
         low = self.min_confidence is not None and confidence < float(self.min_confidence)
         if low and self.on_low_confidence == "error":
             raise DecisionError(
                 f"置信度 {confidence:.2f} 低于阈值 {self.min_confidence}（choice={choice!r}）")
         if low and self.on_low_confidence == "default":
-            default = execution.evaluate(self.default_choice)
-            if default is None:
-                raise DecisionError("on_low_confidence=default 需要配置 default_choice")
-            choice = str(default)
+            choice = self._default(execution)
         return {"choice": choice, "confidence": confidence,
                 "provider": provider_name, "model": str(out.get("model") or ""),
                 "low_confidence": low, "raw": str(out.get("raw") or "")[:2000],
                 "dry_run": False}
+
+    def _execute_batch(self, execution: Any, choices: list[dict],
+                       provider_name: str, dry: bool, ev) -> dict:
+        items = execution.evaluate(self.items)
+        if not isinstance(items, list) or not items:
+            raise DecisionError("items 需为非空列表（批量模式）")
+        if dry:
+            return {"results": [{"index": i, "choice": choices[0]["value"],
+                                 "confidence": 1.0, "low_confidence": False}
+                                for i in range(len(items))],
+                    "provider": provider_name, "model": "",
+                    "low_confidence": False, "raw": "[dry-run]", "dry_run": True}
+
+        fn = DECISION_PROVIDERS.get(provider_name)
+        if fn is None:
+            raise DecisionError(f"decision provider {provider_name!r} 未注册"
+                                f"（已注册：{sorted(DECISION_PROVIDERS)}）")
+        out = fn(question=ev(self.question),
+                 choices=choices,
+                 input=None,
+                 items=items,
+                 api_base=ev(self.api_base),
+                 api_key=ev(self.api_key),
+                 model=ev(self.model),
+                 timeout_secs=self.timeout_secs)
+        entries = out.get("results")
+        if not isinstance(entries, list) or len(entries) != len(items):
+            raise DecisionError(
+                f"provider 批量结果数不符：期望 {len(items)} 条，实际 {str(entries)[:120]}")
+
+        results = []
+        any_low = False
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise DecisionError(f"批量结果第 {i} 条不是对象: {str(entry)[:80]}")
+            choice, confidence = self._checked(entry, choices, index=i)
+            low = self.min_confidence is not None and confidence < float(self.min_confidence)
+            if low and self.on_low_confidence == "error":
+                raise DecisionError(
+                    f"第 {i} 项置信度 {confidence:.2f} 低于阈值 {self.min_confidence}"
+                    f"（choice={choice!r}）")
+            if low and self.on_low_confidence == "default":
+                choice = self._default(execution)
+            any_low = any_low or low
+            results.append({"index": i, "choice": choice,
+                            "confidence": confidence, "low_confidence": low})
+        return {"results": results, "provider": provider_name,
+                "model": str(out.get("model") or ""),
+                "low_confidence": any_low, "raw": str(out.get("raw") or "")[:2000],
+                "dry_run": False}
+
+    def _checked(self, out: dict, choices: list[dict], index: Optional[int] = None):
+        at = "" if index is None else f"第 {index} 项 "
+        choice = str(out.get("choice", ""))
+        if choice not in {c["value"] for c in choices}:
+            raise DecisionError(f"provider 返回的 {at}choice {choice!r} 不在决策空间内")
+        try:
+            return choice, float(out.get("confidence", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise DecisionError(
+                f"provider 返回的 {at}confidence 非数值: {out.get('confidence')!r}") from exc
+
+    def _default(self, execution: Any) -> str:
+        default = execution.evaluate(self.default_choice)
+        if default is None:
+            raise DecisionError("on_low_confidence=default 需要配置 default_choice")
+        return str(default)

@@ -70,13 +70,13 @@ class StubJev:
             def do_POST(self):
                 outer.auth = self.headers.get("Authorization", "")
                 outer.last_body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                answers = {name: {"choice": outer.choice,
+                                  "probabilities": {outer.choice: outer.confidence},
+                                  "confidence": outer.confidence}
+                           for name in outer.last_body.get("questions", {})}
                 data = json.dumps({
                     "model": "openjev-0.1",
-                    "answers": {"decision": {
-                        "choice": outer.choice,
-                        "probabilities": {outer.choice: outer.confidence},
-                        "confidence": outer.confidence,
-                    }},
+                    "answers": answers,
                     "usage": {"input_tokens": 11},
                 }).encode()
                 self.send_response(200)
@@ -247,6 +247,109 @@ def test_jevlike_checkpoint_missing():
                         model="/nonexistent.pt")
     with pytest.raises(DecisionError, match="checkpoint 不存在"):
         node.execute(FakeExecution())
+
+
+def test_llm_provider_batch(openai_stub):
+    openai_stub.content = json.dumps({"results": [
+        {"index": 0, "choice": "spam", "confidence": 0.97},
+        {"index": 1, "choice": "ham", "confidence": 0.5},
+        {"index": 2, "choice": "spam", "confidence": 0.99},
+    ]})
+    node = DecisionNode(id="t", question="逐条判断", choices=["spam", "ham"],
+                        items=["恭喜中奖", "会议改到三点", "再赢一辆跑车"],
+                        min_confidence=0.8,
+                        api_base=openai_stub.base, api_key="sk-x", model="glm-5")
+    out = node.execute(FakeExecution())
+    assert [r["index"] for r in out["results"]] == [0, 1, 2]
+    assert out["results"][0]["choice"] == "spam"
+    assert out["results"][1]["low_confidence"] is True
+    assert out["low_confidence"] is True
+    assert out["dry_run"] is False
+    user_msg = openai_stub.last_body["messages"][1]["content"]
+    assert "[0] 恭喜中奖" in user_msg and "[2] 再赢一辆跑车" in user_msg
+
+
+def test_llm_provider_batch_default_substitution(openai_stub):
+    openai_stub.content = json.dumps({"results": [
+        {"index": 0, "choice": "spam", "confidence": 0.4},
+        {"index": 1, "choice": "ham", "confidence": 0.95},
+    ]})
+    node = DecisionNode(id="t", choices=["spam", "ham"],
+                        items=["a", "b"], min_confidence=0.9,
+                        on_low_confidence="default", default_choice="ham",
+                        api_base=openai_stub.base, api_key="k", model="m")
+    out = node.execute(FakeExecution())
+    assert out["results"][0]["choice"] == "ham"       # 低置信 → 默认项
+    assert out["results"][0]["low_confidence"] is True
+    assert out["results"][1]["choice"] == "ham"
+    assert out["results"][1]["low_confidence"] is False
+
+
+def test_llm_provider_batch_error_mode(openai_stub):
+    openai_stub.content = json.dumps({"results": [
+        {"index": 0, "choice": "spam", "confidence": 0.95},
+        {"index": 1, "choice": "ham", "confidence": 0.4},
+    ]})
+    node = DecisionNode(id="t", choices=["spam", "ham"],
+                        items=["a", "b"], min_confidence=0.9,
+                        on_low_confidence="error",
+                        api_base=openai_stub.base, api_key="k", model="m")
+    with pytest.raises(DecisionError, match="第 1 项"):
+        node.execute(FakeExecution())
+
+
+def test_llm_provider_batch_count_mismatch(openai_stub):
+    openai_stub.content = json.dumps({"results": [{"index": 0, "choice": "spam",
+                                                   "confidence": 0.9}]})
+    node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                        api_base=openai_stub.base, api_key="k", model="m")
+    with pytest.raises(DecisionError, match="批量结果数不符"):
+        node.execute(FakeExecution())
+
+
+def test_jev_provider_batch(jev_stub):
+    jev_stub.choice, jev_stub.confidence = "keep", 0.9
+    node = DecisionNode(id="t", question="是否可交互", provider="jev",
+                        choices={"keep": "可交互元素", "drop": "噪声"},
+                        items=["BUTTON \"提交\" @e1", "TEXT 装饰横幅 @e2"])
+    out = node.execute(FakeExecution())
+    assert [r["choice"] for r in out["results"]] == ["keep", "keep"]
+    qs = jev_stub.last_body["questions"]
+    assert set(qs) == {"item_0", "item_1"}
+    assert all(q["type"] == "choice" for q in qs.values())
+    assert qs["item_0"]["criteria"] == {"keep": "可交互元素", "drop": "噪声"}
+
+
+def test_batch_dry_run():
+    node = DecisionNode(id="t", choices=["first", "second"], items=["a", "b", "c"],
+                        dry_run=True)
+    out = node.execute(FakeExecution())
+    assert [r["choice"] for r in out["results"]] == ["first"] * 3
+    assert out["dry_run"] is True
+
+
+def test_items_must_be_nonempty_list():
+    node = DecisionNode(id="t", choices=["a", "b"], items="not-a-list")
+    with pytest.raises(DecisionError, match="非空列表"):
+        node.execute(FakeExecution())
+    node2 = DecisionNode(id="t", choices=["a", "b"], items=[])
+    with pytest.raises(DecisionError, match="非空列表"):
+        node2.execute(FakeExecution())
+
+
+def test_jevlike_batch_local_checkpoint():
+    pytest.importorskip("torch")
+    pytest.importorskip("jevlike")
+    checkpoint = "/tmp/jevlike-runs/badges.pt"
+    if not __import__("os").path.isfile(checkpoint):
+        pytest.skip("本机未训练 jevlike checkpoint")
+    node = DecisionNode(id="t", question="", choices=["azure crane", "amber badger", "gold heron"],
+                        items=["Choose the exact badge amber badger. Badge: amber badger.",
+                               "Choose the exact badge gold heron. Badge: gold heron."],
+                        provider="jevlike", model=checkpoint)
+    out = node.execute(FakeExecution())
+    assert out["results"][0]["choice"] == "amber badger"
+    assert out["results"][1]["choice"] == "gold heron"
 
 
 def test_unknown_provider():
