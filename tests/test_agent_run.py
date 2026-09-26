@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -179,6 +180,59 @@ class TestAgentRunNode:
             "get_global_variable": lambda self, k, d=None: d,
         })())
         assert "observations" not in out
+
+    def test_claude_details_via_protocol_lines(self, agent_config_repo, monkeypatch):
+        """claude-code 执行器（NDJSON 路径）：经 on_protocol_line 收集原始行，
+        同一解析器产出 observations。stub claude 注入 PATH。"""
+        import json as _json
+
+        bindir = agent_config_repo / "bin"
+        bindir.mkdir()
+        events = [
+            {"type": "system", "subtype": "init", "session_id": "sess-c1"},
+            {"type": "assistant", "message": {"model": "GLM-5.2", "content": [
+                {"type": "tool_use", "id": "c1", "name": "Read",
+                 "input": {"file_path": "/tmp/x"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "data"}]}},
+            {"type": "assistant", "message": {"model": "GLM-5.2", "content": [
+                {"type": "text", "text": "claude 完成"}]}},
+            {"type": "result", "session_id": "sess-c1", "result": "claude 完成",
+             "is_error": False,
+             "usage": {"input_tokens": 11, "output_tokens": 4}},
+        ]
+        stub = bindir / "claude"
+        stub.write_text("#!/bin/sh\ncat <<'STREAM_EOF'\n"
+                        + "\n".join(_json.dumps(e) for e in events)
+                        + "\nSTREAM_EOF\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("TEST_API_KEY", "sk-test")  # provider ${TEST_API_KEY} 插值
+        monkeypatch.setenv("PATH", str(bindir) + os.pathsep +
+                           os.environ["PATH"])
+
+        agents = _json.loads((agent_config_repo / ".flowcast" / "agents.json").read_text())
+        agents["agents"]["claude-glm"] = {
+            "executor": "claude", "model": "GLM-5.2",
+            "provider": "glm-52",
+        }
+        (agent_config_repo / ".flowcast" / "agents.json").write_text(_json.dumps(agents))
+
+        node = AgentRunNode(id="t", agent="claude-glm", prompt="x",
+                            repo=str(agent_config_repo), details=True)
+        out = node.execute(type("E", (), {
+            "evaluate": lambda self, v: v,
+            "get_global_variable": lambda self, k, d=None: d,
+        })())
+        assert "claude 完成" in out["text"]
+        assert out["cli"] == "claude"
+        assert out["model"] == "GLM-5.2"
+        assert out["usage"] == {"input_tokens": 11, "output_tokens": 4}
+        assert out["observations"] == [
+            {"type": "span", "name": "tool:Read",
+             "input": {"file_path": "/tmp/x"}, "output": "data"},
+            {"type": "generation", "name": "turn:1", "model": "GLM-5.2",
+             "output": "claude 完成"},
+        ]
 
     def test_recursive_usage_fallback_from_parsed(self, agent_config_repo):
         """recursive-direct 路径：agentproc 拿不到事件 usage 时，从结果对象

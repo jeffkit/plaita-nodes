@@ -201,8 +201,9 @@ class AgentRunNode(Node):
     - ``repo``: 工作目录（recursive 的 ``--workspace``；默认进程 cwd）
     - ``timeout_secs``: 超时秒数（默认 1800；flowcast 的 recursive 直路径无超时，
       这里是行为改进）
-    - ``details``: 为 true 时 recursive 走 stream-json，内部事件（工具调用、
-      文本轮）解析为输出里的 ``observations`` 列表，供观测侧建子 observation
+    - ``details``: 为 true 时收集 agent 内部事件（工具调用、文本轮）为输出
+      里的 ``observations`` 列表，供观测侧建子 observation——recursive 切
+      stream-json 后解析全文；claude-code 本走 stream-json，经协议行回调收集
     - ``dry_run``: 为 true（或流程 globalContext.dry_run=true）时不真正调用，
       返回 fake 文本
 
@@ -252,19 +253,31 @@ class AgentRunNode(Node):
 
         extra_env = dict(profile["env"])
         extra_env.setdefault("RECURSIVE_WORKSPACE", repo or ".")
-        # details：recursive 切 stream-json 输出。plain 路径 reply = 完整
-        # stdout，跑完后对全文解析即可拿到内部事件，无需流式回调。
+        # details：recursive 切 stream-json 输出（plain 路径 reply=完整 stdout，
+        # 全文后解析）；claude-code 本就走 stream-json（NDJSON 路径），经
+        # on_protocol_line 收集原始行。两者事件同构（Claude 兼容），共用解析器。
         want_details = bool(execution.evaluate(self.details)) if self.details is not None else False
         if want_details and executor == "recursive":
             extra_env["RECURSIVE_OUTPUT_FORMAT"] = "stream-json"
+        # 协议行始终收集（纯内存 append）：executor 在进程内 NDJSON 路径不回调
+        # 通用 usage 捕获（claude-code 的 parse_event 不产 usage），节点的
+        # usage/observations 都从这里取。
+        protocol_lines: list[str] = []
+
+        def _on_protocol_line(line: str) -> None:
+            protocol_lines.append(line)
 
         # 观测归因（Langfuse generation 需 model 字段）：profile 显式 model →
-        # provider 翻译出的 RECURSIVE_MODEL → agent 名兜底
-        model = (profile.get("model") or extra_env.get("RECURSIVE_MODEL") or agent_name)
+        # provider 翻译出的执行器模型 env → agent 名兜底
+        model = (profile.get("model")
+                 or extra_env.get("RECURSIVE_MODEL")
+                 or extra_env.get("CLAUDE_MODEL")
+                 or agent_name)
         result = agentproc_run(
             {"executor": ap_executor},
             RunOptions(message=str(prompt), extra_env=extra_env,
-                       timeout_secs=self.timeout_secs),
+                       timeout_secs=self.timeout_secs,
+                       on_protocol_line=_on_protocol_line),
         )
         if result.error or result.exit_code != 0:
             raise AgentRunError(result.error or f"{agent_name} 退出码 {result.exit_code}")
@@ -282,6 +295,21 @@ class AgentRunNode(Node):
             usage = result.usage or parsed.get("usage")
             if want_details:
                 observations = parse_stream_details(result.reply.splitlines())
+        elif protocol_lines:
+            # claude-code 等流式执行器：终态 result 事件的 usage 兜底
+            for raw in protocol_lines:
+                stripped = raw.strip()
+                if not stripped.startswith("{"):
+                    continue
+                try:
+                    event = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "result" and isinstance(event.get("usage"), dict):
+                    usage = result.usage or event["usage"]
+                    break
+            if want_details:
+                observations = parse_stream_details(protocol_lines)
 
         out = {"text": text, "cli": executor, "model": model,
                "session_id": result.session_id,
