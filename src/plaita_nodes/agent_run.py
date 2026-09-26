@@ -10,6 +10,9 @@
 - 输出：``{"text", "cli", "model", "session_id", "usage", "dry_run"}``，
   下游用 ``$NODE.<id>.text`` 引用。``model`` 供观测侧（plaita.obs 的
   generation 判定）归因 token 用量：profile.model → RECURSIVE_MODEL → agent 名。
+- ``details=true`` 时 recursive 走 stream-json 输出，节点解析内部事件
+  （工具调用、文本轮）为 ``observations`` 列表附进输出，供观测侧在
+  agent span 下建子 observation——打开"agent 内部循环"的可见性。
 
 日志脱敏：任何路径都不打印 apiKey / ANTHROPIC_AUTH_TOKEN。
 """
@@ -37,7 +40,7 @@ def _make_recursive_handlers():
     def build_args(message: str, session_id: str, env: dict) -> list:
         bin_name = env.get("RECURSIVE_BIN", "recursive")
         args = [bin_name, "--workspace", env.get("RECURSIVE_WORKSPACE", "."),
-                "--output-format", "json"]
+                "--output-format", env.get("RECURSIVE_OUTPUT_FORMAT", "json")]
         if env.get("RECURSIVE_MODEL"):
             args += ["--model", env["RECURSIVE_MODEL"]]
         if env.get("RECURSIVE_MAX_STEPS"):
@@ -46,6 +49,77 @@ def _make_recursive_handlers():
         return args
 
     return {"build_args": build_args}
+
+
+# ── stream-json 内部事件 → 观测 observations ────────────────────────────
+# recursive --output-format stream-json 是 Claude 兼容 NDJSON：
+#   {"type":"system","subtype":"init",...}（跳过）
+#   {"type":"stream_event",...}（原始增量，跳过）
+#   {"type":"assistant","message":{content:[{type:"tool_use",name,id,input}|
+#                                         {type:"text",text}], model, ...}}
+#   {"type":"user","message":{content:[{type:"tool_result",tool_use_id,content}]}}
+#   {"type":"result",...,"usage":{...}}（终态对象，聚合 usage 由它出）
+
+_DETAILS_CAP = 50  # 单次 agent 运行的观测条数上限，防超长会话撑爆 trace
+
+
+def parse_stream_details(lines) -> list[dict]:
+    """把 recursive stream-json 行流解析为观测 observations 列表。
+
+    - ``assistant`` 的 tool_use 与后续 ``user`` 的 tool_result 按 tool_use_id
+      配对 → ``{"type":"span","name":"tool:<名>","input","output"}``
+    - ``assistant`` 的 text 块 → ``{"type":"generation","name":"turn:<n>",
+      "model","output"}``（逐轮 usage 本仓 provider 不上报，留空）
+    - system / stream_event / result 行跳过；超出 _DETAILS_CAP 截断。
+    """
+    observations: list[dict] = []
+    pending_tools: dict[str, dict] = {}  # tool_use_id → tool_use block
+    turn_no = 0
+    for raw in lines:
+        line = raw.strip() if isinstance(raw, str) else ""
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        etype = event.get("type")
+        if etype == "assistant":
+            message = event.get("message") or {}
+            model = message.get("model")
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    pending_tools[block.get("id")] = block
+                elif btype == "text" and (block.get("text") or "").strip():
+                    turn_no += 1
+                    observations.append({
+                        "type": "generation", "name": f"turn:{turn_no}",
+                        "model": model, "output": block.get("text"),
+                    })
+        elif etype == "user":
+            message = event.get("message") or {}
+            for block in message.get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_use = pending_tools.pop(block.get("tool_use_id"), None)
+                if tool_use is None:
+                    continue
+                result = block.get("content")
+                if isinstance(result, list):  # content block 数组 → 拼文本
+                    result = "\n".join(
+                        b.get("text", "") for b in result
+                        if isinstance(b, dict) and b.get("type") == "text")
+                observations.append({
+                    "type": "span", "name": f"tool:{tool_use.get('name')}",
+                    "input": tool_use.get("input"),
+                    "output": result,
+                })
+        if len(observations) >= _DETAILS_CAP:
+            break
+    return observations[:_DETAILS_CAP]
 
 
 def register_recursive_direct() -> None:
@@ -127,10 +201,13 @@ class AgentRunNode(Node):
     - ``repo``: 工作目录（recursive 的 ``--workspace``；默认进程 cwd）
     - ``timeout_secs``: 超时秒数（默认 1800；flowcast 的 recursive 直路径无超时，
       这里是行为改进）
+    - ``details``: 为 true 时 recursive 走 stream-json，内部事件（工具调用、
+      文本轮）解析为输出里的 ``observations`` 列表，供观测侧建子 observation
     - ``dry_run``: 为 true（或流程 globalContext.dry_run=true）时不真正调用，
       返回 fake 文本
 
-    输出：``{"text", "cli", "model", "session_id", "usage", "dry_run"}``。
+    输出：``{"text", "cli", "model", "session_id", "usage", "dry_run"}``；
+    ``details=true`` 且 recursive 时额外带 ``observations``。
     """
 
     node_type: ClassVar[str] = "agentrun"
@@ -140,6 +217,7 @@ class AgentRunNode(Node):
     prompt: Optional[Any] = None
     repo: Optional[Any] = None
     timeout_secs: int = Field(default=1800)
+    details: bool = False
     dry_run: bool = False
 
     def execute(self, execution: Any) -> dict:
@@ -174,6 +252,12 @@ class AgentRunNode(Node):
 
         extra_env = dict(profile["env"])
         extra_env.setdefault("RECURSIVE_WORKSPACE", repo or ".")
+        # details：recursive 切 stream-json 输出。plain 路径 reply = 完整
+        # stdout，跑完后对全文解析即可拿到内部事件，无需流式回调。
+        want_details = bool(execution.evaluate(self.details)) if self.details is not None else False
+        if want_details and executor == "recursive":
+            extra_env["RECURSIVE_OUTPUT_FORMAT"] = "stream-json"
+
         # 观测归因（Langfuse generation 需 model 字段）：profile 显式 model →
         # provider 翻译出的 RECURSIVE_MODEL → agent 名兜底
         model = (profile.get("model") or extra_env.get("RECURSIVE_MODEL") or agent_name)
@@ -187,6 +271,7 @@ class AgentRunNode(Node):
 
         text = result.reply
         usage = result.usage
+        observations: Optional[list[dict]] = None
         if executor == "recursive":
             parsed = extract_recursive_result(result.reply)
             if parsed.get("is_error"):
@@ -195,10 +280,15 @@ class AgentRunNode(Node):
             # plain 直调路径 agentproc 解析不到 NDJSON 事件，usage 兜底取自
             # 结果对象本体（recursive --output-format json 自带 usage 字段）
             usage = result.usage or parsed.get("usage")
+            if want_details:
+                observations = parse_stream_details(result.reply.splitlines())
 
-        return {"text": text, "cli": executor, "model": model,
-                "session_id": result.session_id,
-                "usage": usage, "dry_run": False}
+        out = {"text": text, "cli": executor, "model": model,
+               "session_id": result.session_id,
+               "usage": usage, "dry_run": False}
+        if observations is not None:
+            out["observations"] = observations
+        return out
 
 
 def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",

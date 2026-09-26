@@ -5,7 +5,9 @@ import json
 
 import pytest
 
-from plaita_nodes.agent_run import AgentRunError, AgentRunNode, extract_recursive_result
+from plaita_nodes.agent_run import (
+    AgentRunError, AgentRunNode, extract_recursive_result, parse_stream_details,
+)
 from plaita_nodes.config import AgentConfigError
 
 
@@ -92,6 +94,91 @@ class TestAgentRunNode:
                 "evaluate": lambda self, v: v,
                 "get_global_variable": lambda self, k, d=None: d,
             })())
+
+    def test_parse_stream_details_pairs_tools_and_turns(self):
+        lines = [
+            '{"type":"system","subtype":"init"}',
+            '{"type":"assistant","message":{"model":"GLM-5.2","content":['
+            '{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls /tmp"}}]}}',
+            '{"type":"user","message":{"content":['
+            '{"type":"tool_result","tool_use_id":"t1","content":"a.txt\\nb.txt"}]}}',
+            "not a json line",
+            '{"type":"assistant","message":{"model":"GLM-5.2","content":['
+            '{"type":"text","text":"完成"}]}}',
+            '{"type":"result","result":"完成","usage":{"input_tokens":9,"output_tokens":2}}',
+        ]
+        obs = parse_stream_details(lines)
+        assert obs == [
+            {"type": "span", "name": "tool:Bash",
+             "input": {"command": "ls /tmp"}, "output": "a.txt\nb.txt"},
+            {"type": "generation", "name": "turn:1", "model": "GLM-5.2", "output": "完成"},
+        ]
+
+    def test_parse_stream_details_cap(self):
+        from plaita_nodes.agent_run import _DETAILS_CAP
+        lines = ['{"type":"assistant","message":{"model":"m","content":['
+                 '{"type":"text","text":"t%d"}]}}' % i for i in range(_DETAILS_CAP + 10)]
+        assert len(parse_stream_details(lines)) == _DETAILS_CAP
+
+    def test_details_mode_collects_observations(self, agent_config_repo):
+        """details=true：recursive 走 stream-json，输出带 observations。"""
+        import json as _json
+        events = [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"model": "M-1", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "echo hi"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "hi"}]}},
+            {"type": "assistant", "message": {"model": "M-1", "content": [
+                {"type": "text", "text": "搞定"}]}},
+            {"type": "result", "result": "搞定", "is_error": False,
+             "usage": {"input_tokens": 5, "output_tokens": 1}},
+        ]
+        stub = agent_config_repo / "stub-stream.sh"
+        body = "\n".join(_json.dumps(e) for e in events)
+        stub.write_text("#!/bin/sh\ncat <<'STREAM_EOF'\n" + body + "\nSTREAM_EOF\n")
+        stub.chmod(0o755)
+        agents = _json.loads((agent_config_repo / ".flowcast" / "agents.json").read_text())
+        agents["agents"]["rec-stream"] = {
+            "executor": "recursive", "model": "M-1",
+            "env": {"RECURSIVE_BIN": str(stub)},
+        }
+        (agent_config_repo / ".flowcast" / "agents.json").write_text(_json.dumps(agents))
+
+        node = AgentRunNode(id="t", agent="rec-stream", prompt="x",
+                            repo=str(agent_config_repo), details=True)
+        out = node.execute(type("E", (), {
+            "evaluate": lambda self, v: v,
+            "get_global_variable": lambda self, k, d=None: d,
+        })())
+        assert out["text"] == "搞定"
+        assert out["usage"] == {"input_tokens": 5, "output_tokens": 1}
+        assert out["observations"] == [
+            {"type": "span", "name": "tool:Bash",
+             "input": {"command": "echo hi"}, "output": "hi"},
+            {"type": "generation", "name": "turn:1", "model": "M-1", "output": "搞定"},
+        ]
+
+    def test_details_false_has_no_observations_key(self, agent_config_repo):
+        import json as _json
+        stub = agent_config_repo / "stub-plain.sh"
+        stub.write_text("#!/bin/sh\nprintf '%s' "
+                        "'" + _json.dumps({"result": "ok", "is_error": False}) + "'")
+        stub.chmod(0o755)
+        agents = _json.loads((agent_config_repo / ".flowcast" / "agents.json").read_text())
+        agents["agents"]["rec-plain"] = {
+            "executor": "recursive", "env": {"RECURSIVE_BIN": str(stub)},
+        }
+        (agent_config_repo / ".flowcast" / "agents.json").write_text(_json.dumps(agents))
+
+        node = AgentRunNode(id="t", agent="rec-plain", prompt="x",
+                            repo=str(agent_config_repo))
+        out = node.execute(type("E", (), {
+            "evaluate": lambda self, v: v,
+            "get_global_variable": lambda self, k, d=None: d,
+        })())
+        assert "observations" not in out
 
     def test_recursive_usage_fallback_from_parsed(self, agent_config_repo):
         """recursive-direct 路径：agentproc 拿不到事件 usage 时，从结果对象
