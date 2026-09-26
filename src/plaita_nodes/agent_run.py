@@ -186,15 +186,19 @@ class AgentRunNode(Node):
             raise AgentRunError(result.error or f"{agent_name} 退出码 {result.exit_code}")
 
         text = result.reply
+        usage = result.usage
         if executor == "recursive":
             parsed = extract_recursive_result(result.reply)
             if parsed.get("is_error"):
                 raise AgentRunError(f"recursive is_error: {str(parsed.get('result'))[:300]}")
             text = str(parsed.get("result") or "")
+            # plain 直调路径 agentproc 解析不到 NDJSON 事件，usage 兜底取自
+            # 结果对象本体（recursive --output-format json 自带 usage 字段）
+            usage = result.usage or parsed.get("usage")
 
         return {"text": text, "cli": executor, "model": model,
                 "session_id": result.session_id,
-                "usage": result.usage, "dry_run": False}
+                "usage": usage, "dry_run": False}
 
 
 def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",

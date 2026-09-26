@@ -69,7 +69,7 @@ class TestAgentRunNode:
         assert out["model"] == "TEST-MODEL"
         assert out["usage"] is None or isinstance(out["usage"], dict)
 
-    def test_recursive_error_result_raises(self, agent_config_repo, monkeypatch):
+    def test_recursive_error_result_raises(self, agent_config_repo):
         """recursive 返回 is_error=true 时节点应抛错。"""
         from agentproc import EXECUTORS
 
@@ -92,3 +92,34 @@ class TestAgentRunNode:
                 "evaluate": lambda self, v: v,
                 "get_global_variable": lambda self, k, d=None: d,
             })())
+
+    def test_recursive_usage_fallback_from_parsed(self, agent_config_repo):
+        """recursive-direct 路径：agentproc 拿不到事件 usage 时，从结果对象
+        本体兜底（recursive --output-format json 自带 usage 字段）。"""
+        import json as _json
+        from pathlib import Path
+
+        # 桩"recursive 二进制"：输出带 usage 的结果对象（经 RECURSIVE_BIN 注入）
+        stub = agent_config_repo / "stub-recursive.sh"
+        payload = {"result": "ok", "is_error": False,
+                   "usage": {"input_tokens": 36, "output_tokens": 3,
+                             "cache_read_input_tokens": 100}}
+        stub.write_text("#!/bin/sh\nprintf '%s' '" + _json.dumps(payload) + "'\n")
+        stub.chmod(0o755)
+
+        agents = _json.loads((agent_config_repo / ".flowcast" / "agents.json").read_text())
+        agents["agents"]["rec-use"] = {
+            "executor": "recursive", "model": "M-1",
+            "env": {"RECURSIVE_BIN": str(stub)},
+        }
+        (agent_config_repo / ".flowcast" / "agents.json").write_text(_json.dumps(agents))
+
+        node = AgentRunNode(id="t", agent="rec-use", prompt="x",
+                            repo=str(Path("/tmp")))
+        out = node.execute(type("E", (), {
+            "evaluate": lambda self, v: v,
+            "get_global_variable": lambda self, k, d=None: d,
+        })())
+        assert out["text"] == "ok"
+        assert out["model"] == "M-1"
+        assert out["usage"] == payload["usage"]
