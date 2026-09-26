@@ -40,7 +40,10 @@ def _make_recursive_handlers():
     def build_args(message: str, session_id: str, env: dict) -> list:
         bin_name = env.get("RECURSIVE_BIN", "recursive")
         args = [bin_name, "--workspace", env.get("RECURSIVE_WORKSPACE", "."),
-                "--output-format", env.get("RECURSIVE_OUTPUT_FORMAT", "json")]
+                "--output-format", env.get("RECURSIVE_OUTPUT_FORMAT", "json"),
+                # 无头自动化语义：recursive-direct 无 permission 桥接，
+                # 不显式放行时工具调用会发 control_request 等待批准直至挂起
+                "--permission-mode", "auto"]
         if env.get("RECURSIVE_MODEL"):
             args += ["--model", env["RECURSIVE_MODEL"]]
         if env.get("RECURSIVE_MAX_STEPS"):

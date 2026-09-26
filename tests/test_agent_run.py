@@ -96,6 +96,15 @@ class TestAgentRunNode:
                 "get_global_variable": lambda self, k, d=None: d,
             })())
 
+    def test_recursive_build_args_permission_mode_auto(self):
+        """无头自动化必须显式放行工具权限：recursive-direct 无 permission
+        桥接，default 模式下工具调用发 control_request 等批准直至挂起。"""
+        from plaita_nodes.agent_run import _make_recursive_handlers
+
+        argv = _make_recursive_handlers()["build_args"]("hi", "", {})
+        assert "--permission-mode" in argv
+        assert argv[argv.index("--permission-mode") + 1] == "auto"
+
     def test_parse_stream_details_pairs_tools_and_turns(self):
         lines = [
             '{"type":"system","subtype":"init"}',
