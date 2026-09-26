@@ -57,6 +57,17 @@ class TestAgentRunNode:
         assert out["dry_run"] is False
         assert out["cli"] == "test-echo"
         assert "msg=hello world" in out["text"]
+        assert out["model"] == "echo"  # profile 无 model → agent 名兜底
+
+    def test_output_model_from_profile(self, agent_config_repo, register_test_echo_executor):
+        """输出带 model（Langfuse generation 归因用）：profile.model 优先。"""
+        node = AgentRunNode(id="t", agent="echo-m", prompt="hi", repo=str(agent_config_repo))
+        out = node.execute(type("E", (), {
+            "evaluate": lambda self, v: v,
+            "get_global_variable": lambda self, k, d=None: d,
+        })())
+        assert out["model"] == "TEST-MODEL"
+        assert out["usage"] is None or isinstance(out["usage"], dict)
 
     def test_recursive_error_result_raises(self, agent_config_repo, monkeypatch):
         """recursive 返回 is_error=true 时节点应抛错。"""

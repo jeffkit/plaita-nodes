@@ -33,6 +33,7 @@ def agent_config_repo(tmp_path: Path, monkeypatch) -> Path:
                 "env": {"RECURSIVE_MAX_TOKENS": "65536"},
             },
             "echo": {"executor": "test-echo"},
+            "echo-m": {"executor": "test-echo", "model": "TEST-MODEL"},
         }
     }), encoding="utf-8")
     (flowcast / "providers.json").write_text(json.dumps({

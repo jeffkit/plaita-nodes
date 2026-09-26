@@ -7,8 +7,9 @@
   ``runRecursiveDirect``：``recursive --workspace . --output-format json
   [--model M] [--max-steps N] run "<prompt>"``，stdout 末尾为单个 JSON
   对象，取 ``.result`` 为回复、``.is_error`` 为失败。
-- 输出：``{"text", "cli", "session_id", "usage", "dry_run"}``，
-  下游用 ``$NODE.<id>.text`` 引用。
+- 输出：``{"text", "cli", "model", "session_id", "usage", "dry_run"}``，
+  下游用 ``$NODE.<id>.text`` 引用。``model`` 供观测侧（plaita.obs 的
+  generation 判定）归因 token 用量：profile.model → RECURSIVE_MODEL → agent 名。
 
 日志脱敏：任何路径都不打印 apiKey / ANTHROPIC_AUTH_TOKEN。
 """
@@ -129,7 +130,7 @@ class AgentRunNode(Node):
     - ``dry_run``: 为 true（或流程 globalContext.dry_run=true）时不真正调用，
       返回 fake 文本
 
-    输出：``{"text", "cli", "session_id", "usage", "dry_run"}``。
+    输出：``{"text", "cli", "model", "session_id", "usage", "dry_run"}``。
     """
 
     node_type: ClassVar[str] = "agentrun"
@@ -150,7 +151,8 @@ class AgentRunNode(Node):
         if dry:
             preview = prompt[:80] + ("…" if len(prompt) > 80 else "")
             return {"text": f"[dry-run] {agent_name} would run: {preview}",
-                    "cli": agent_name, "session_id": "", "usage": None, "dry_run": True}
+                    "cli": agent_name, "model": None, "session_id": "",
+                    "usage": None, "dry_run": True}
 
         profile = resolve_agent(agent_name, repo=repo)
         executor = profile["executor"]
@@ -172,6 +174,9 @@ class AgentRunNode(Node):
 
         extra_env = dict(profile["env"])
         extra_env.setdefault("RECURSIVE_WORKSPACE", repo or ".")
+        # 观测归因（Langfuse generation 需 model 字段）：profile 显式 model →
+        # provider 翻译出的 RECURSIVE_MODEL → agent 名兜底
+        model = (profile.get("model") or extra_env.get("RECURSIVE_MODEL") or agent_name)
         result = agentproc_run(
             {"executor": ap_executor},
             RunOptions(message=str(prompt), extra_env=extra_env,
@@ -187,7 +192,8 @@ class AgentRunNode(Node):
                 raise AgentRunError(f"recursive is_error: {str(parsed.get('result'))[:300]}")
             text = str(parsed.get("result") or "")
 
-        return {"text": text, "cli": executor, "session_id": result.session_id,
+        return {"text": text, "cli": executor, "model": model,
+                "session_id": result.session_id,
                 "usage": result.usage, "dry_run": False}
 
 
