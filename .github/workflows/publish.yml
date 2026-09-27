@@ -1,8 +1,10 @@
 name: Publish to PyPI
 
 # 推送 v* 标签时发布 plaita-nodes 到 PyPI。
-# 前置一次性配置：pypi.org 上为 plaita-nodes 添加 Pending Publisher，
-# owner=jeffkit repo=plaita-nodes workflow=Publish to PyPI environment=pypi
+# 认证：PYPI_API_TOKEN secret（项目级 API token，username=__token__）。
+# （如日后改为 Trusted Publishing：删 password 行并在 pypi.org 配
+#  Pending Publisher，owner=jeffkit repo=plaita-nodes workflow=本文件名
+#  environment=pypi。）
 on:
   push:
     tags: ["v*"]
@@ -10,12 +12,10 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: pypi
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -23,3 +23,5 @@ jobs:
           python-version: "3.10"
       - run: python -m pip install --upgrade build && python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
