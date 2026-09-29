@@ -61,12 +61,14 @@ class GitPublishNode(Node):
             raise ValueError("git_publish 节点缺少 worktree_dir/branch_name 字段")
         wt = str(execution.evaluate(self.worktree_dir))
         branch = str(execution.evaluate(self.branch_name))
+        # merge_mode 经 DSL 传入时是表达式串（如 "$INPUT.push_mode"），必须求值
+        merge_mode = str(execution.evaluate(self.merge_mode) or "branch")
 
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
         if dry:
             return {"pushed": True, "merged": None, "push_note": "", "note": "dry-run：跳过 git 操作",
                     "dry_run": True}
-        if self.merge_mode == "main" and self.main_clone is None:
+        if merge_mode == "main" and self.main_clone is None:
             raise ValueError("git_publish merge_mode=main 需要 main_clone 字段")
 
         def sh(args, cwd=None, t=None):
@@ -95,7 +97,7 @@ class GitPublishNode(Node):
             pushed = rp.returncode == 0
             push_note = "" if pushed else (rp.stderr or "")[-300:]
 
-        if self.merge_mode != "main":
+        if merge_mode != "main":
             return {"pushed": pushed, "merged": None, "push_note": push_note,
                     "note": "branch 模式：仅推分支，不合并 main"}
 

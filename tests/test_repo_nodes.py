@@ -325,3 +325,24 @@ def test_publish_dry_run_no_git_side_effect(git_repo, _fake_exec):
 @pytest.fixture
 def _fake_exec():
     return _FakeExec()
+
+def test_publish_merge_mode_as_expression_string(git_repo, tmp_path, _fake_exec):
+    """DSL 传参下 merge_mode 是 "$INPUT.push_mode" 表达式串——节点必须求值而非直用。"""
+    wt, origin = git_repo
+    main_clone = tmp_path / "main2"
+    subprocess.run(["git", "clone", str(origin), str(main_clone)], check=True, capture_output=True)
+    _git("config", "user.email", "t@t", cwd=main_clone)
+    _git("config", "user.name", "t", cwd=main_clone)
+    (wt / "b.txt").write_text("x")
+
+    class _EvalExec(_FakeExec):
+        def evaluate(self, v):
+            if v == "$INPUT.push_mode":
+                return "main"
+            return v
+
+    node = GitPublishNode(id="g", worktree_dir=str(wt), branch_name="p/issue-1",
+                          issue_number=1, commit_message="feat: x",
+                          merge_mode="$INPUT.push_mode", main_clone=str(main_clone))
+    out = node.execute(_EvalExec())
+    assert out["merged"] is True  # 表达式被求值为 main → 真的走了合并
