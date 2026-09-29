@@ -16,6 +16,9 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 | `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 轮询回复 |
 | `notify` | 通知 | terminal 后端（stdout） |
 | `writefile` | 写文件 | UTF-8 写文件，支持 JSON 序列化 |
+| `github_comment` | GitHub 评论 | 公开出害口收敛点：正文消毒（本机路径/密钥/未执行的 `$()` 命令替换打码）+ `dedup_marker` 去重（断点续跑不重发）+ `footer` 尾注 + artifact 留档；dry-run 写草稿不连网 |
+| `git_publish` | Git 发布 | 幂等 commit/push：有改动一律先 commit，远端头==本地头才跳过（重投不丢改动）；`merge_mode=main` 时 ff 合并 `origin/<branch>`（失败 abort 如实回报）；提交消息 `commit_message` > `plan_file` 的 `COMMIT_MESSAGE:` 行 > `fix: issue #N` |
+| `parse_json` | JSON 解析 | LLM 结构化输出解析：逐行倒序找严格 JSON → rfind 切片兜底（正文带花括号不误杀）；`choices` verdict 白名单、`default` fail-safe 兜底（`parse_ok`/`parse_error` 明细）、`join_fields` 列表拼接 |
 
 节点经 pyproject 的 `[project.entry-points."plaita.nodes"]` 自动注册；`plaita_nodes.register_all()` 可手动注册。
 
@@ -83,3 +86,7 @@ JSON 用法示例（agentrun + 模板表达式）：
 pip install -e ".[dev]"
 pytest
 ```
+
+## 变更摘要
+
+- **0.6.0**（2026-09-29）：新增 `github_comment` / `git_publish` / `parse_json` 三节点——出害口消毒+去重、幂等发布、LLM 输出健壮解析（issue-pipeline #43 解析策略沉淀）。修复 `__version__` 漂移（0.4.0 → 与 pyproject 同步）。

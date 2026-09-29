@@ -9,6 +9,9 @@ from .database import SqlQueryNode
 from .decision import DECISION_PROVIDERS, DecisionError, DecisionNode, register_decision_provider
 from .email import EmailSendNode
 from .capture import CaptureConfigError, CaptureNode
+from .github_comment import GithubCommentNode, redact_text
+from .git_publish import GitPublishNode
+from .parse_json import ParseJsonNode
 from .config import (
     EXECUTOR_ALIASES,
     AgentConfigError,
@@ -27,9 +30,9 @@ from .notify import NotifyNode
 from .webhooks import DingtalkWebhookNode, FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 
-_ALL_NODES = [AgentRunNode, ApiRequestNode, CaptureNode, DecisionNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
+_ALL_NODES = [AgentRunNode, GithubCommentNode, GitPublishNode, ParseJsonNode, ApiRequestNode, CaptureNode, DecisionNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
 
 
 def register_all() -> None:
@@ -49,6 +52,9 @@ __all__ = [
     "ReportNode", "report_append", "report_read",
     "NotifyNode",
     "WriteFileNode",
+    "GithubCommentNode", "redact_text",
+    "GitPublishNode",
+    "ParseJsonNode",
     "register_all",
     "load_merged_config", "resolve_agent", "resolve_provider", "interpolate",
     "AgentConfigError", "EXECUTOR_ALIASES",
