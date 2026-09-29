@@ -346,3 +346,98 @@ def test_publish_merge_mode_as_expression_string(git_repo, tmp_path, _fake_exec)
                           merge_mode="$INPUT.push_mode", main_clone=str(main_clone))
     out = node.execute(_EvalExec())
     assert out["merged"] is True  # 表达式被求值为 main → 真的走了合并
+
+
+def test_publish_none_mode_commits_locally_without_push(git_repo, _fake_exec):
+    """none 模式：幂等 commit 落在本地分支，但绝不 push（不出害仓位）。"""
+    wt, origin = git_repo
+    (wt / "b.txt").write_text("change")
+    node = GitPublishNode(id="g", worktree_dir=str(wt), branch_name="p/issue-1",
+                          issue_number=1, commit_message="feat: local-only",
+                          merge_mode="none")
+    out = node.execute(_fake_exec)
+    assert out["pushed"] is False and out["merged"] is None
+    assert "未推送" in out["note"]
+    # 本地分支确实有提交，远端确实没有分支
+    assert "feat: local-only" in _git("log", "--oneline", "-1", cwd=wt)
+    assert "p/issue-1" not in _git("ls-remote", "--heads", "origin", cwd=wt)
+
+
+def test_publish_pr_mode_creates_pr_with_base(git_repo, tmp_path, monkeypatch, _fake_exec):
+    """pr 模式：推分支后 gh pr create --base <base_branch>；PR 已存在不算失败。"""
+    wt, _origin = git_repo
+    (wt / "b.txt").write_text("change")
+    calls = tmp_path / "pr_calls.log"
+
+    bin = tmp_path / "fakebin"
+    bin.mkdir(exist_ok=True)
+    script = bin / "gh"
+    script.write_text("#!/usr/bin/env python3\n"
+                      "import sys\n"
+                      f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                      "print('https://github.com/o/r/pull/9')\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin}:{os.environ['PATH']}")
+
+    node = GitPublishNode(id="g", worktree_dir=str(wt), branch_name="p/issue-1",
+                          issue_number=1, commit_message="feat: pr flow (#1)",
+                          merge_mode="pr", base_branch="develop")
+    out = node.execute(_fake_exec)
+    assert out["pushed"] is True and out["merged"] is False
+    assert "pull/9" in out["pr_url"]
+    argv = calls.read_text().splitlines()[-1]
+    assert "--base develop" in argv and "--head p/issue-1" in argv
+
+
+def test_publish_main_mode_respects_base_branch(git_repo, tmp_path, _fake_exec):
+    """main 模式 + base_branch=develop：ff 合并的是分支、推送目标是 develop。"""
+    wt, origin = git_repo
+    subprocess.run(["git", "-C", str(wt), "push", "origin", "main:develop"],
+                   check=True, capture_output=True)
+    main_clone = tmp_path / "devclone"
+    subprocess.run(["git", "clone", str(origin), str(main_clone), "-b", "develop"],
+                   check=True, capture_output=True)
+    _git("config", "user.email", "t@t", cwd=main_clone)
+    _git("config", "user.name", "t", cwd=main_clone)
+    (wt / "b.txt").write_text("change")
+    node = GitPublishNode(id="g", worktree_dir=str(wt), branch_name="p/issue-1",
+                          issue_number=1, commit_message="feat: dev flow",
+                          merge_mode="main", main_clone=str(main_clone),
+                          base_branch="develop")
+    out = node.execute(_fake_exec)
+    assert out["merged"] is True
+    assert "develop" in out["note"]
+    _git("fetch", "origin", cwd=main_clone)
+    assert "feat: dev flow" in _git("log", "--oneline", "origin/develop", cwd=main_clone)
+
+
+def test_publish_invalid_merge_mode_rejected(git_repo, _fake_exec):
+    wt, _origin = git_repo
+    node = GitPublishNode(id="g", worktree_dir=str(wt), branch_name="p/issue-1",
+                          issue_number=1, merge_mode="force-push")
+    with pytest.raises(ValueError, match="merge_mode"):
+        node.execute(_fake_exec)
+
+
+# ---------------------------------------------------------------------------
+# gate（超时表达式求值）
+# ---------------------------------------------------------------------------
+
+def test_gate_timeout_secs_as_expression_string(tmp_path, monkeypatch):
+    """DSL 传参下 timeout_secs 是 "$INPUT.gate_timeout_secs" 表达式串——必须求值。"""
+    from plaita_nodes.gate import GateNode
+
+    class _EvalExec(_FakeExec):
+        def evaluate(self, v):
+            if v == "$INPUT.gate_timeout_secs":
+                return 60
+            return v
+
+    node = GateNode(id="gt", command="true", gate_name="t", cwd=str(tmp_path),
+                    timeout_secs="$INPUT.gate_timeout_secs")
+    out = node.execute(_EvalExec())
+    assert out["passed"] is True  # 表达式求值成 60 后正常跑完，而不是 int(str) 崩
+
+    node2 = GateNode(id="gt2", command="true", gate_name="t", cwd=str(tmp_path),
+                     timeout_secs=30)
+    assert node2.execute(_FakeExec())["passed"] is True  # 字面 int 兼容不变

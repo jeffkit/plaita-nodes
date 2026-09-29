@@ -220,7 +220,9 @@ class AgentRunNode(Node):
     agent: Optional[Any] = "glm-52"
     prompt: Optional[Any] = None
     repo: Optional[Any] = None
-    timeout_secs: int = Field(default=1800)
+    # Any 而非 int：DSL 传参下是表达式串（issue-pipeline v0.3 per-repo 预算），
+    # execute 内求值后转 int（pydantic 构造期会拒收 str 进 int 字段）
+    timeout_secs: Any = Field(default=1800)
     details: bool = False
     dry_run: bool = False
 
@@ -279,7 +281,7 @@ class AgentRunNode(Node):
         result = agentproc_run(
             {"executor": ap_executor},
             RunOptions(message=str(prompt), extra_env=extra_env,
-                       timeout_secs=self.timeout_secs,
+                       timeout_secs=int(execution.evaluate(self.timeout_secs) or 1800),
                        on_protocol_line=_on_protocol_line),
         )
         if result.error or result.exit_code != 0:

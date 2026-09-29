@@ -40,7 +40,9 @@ class GateNode(Node):
     command: Optional[Any] = None
     gate_name: str = Field(default="quality-gate")
     cwd: Optional[Any] = None
-    timeout_secs: int = Field(default=600)
+    # Any 而非 int：DSL 传参下是 "$INPUT.gate_timeout_secs" 表达式串（pydantic
+    # 会在构造期拒收 str 进 int 字段），execute 内求值后再转 int
+    timeout_secs: Any = Field(default=600)
     max_retries: int = Field(default=0)
     dry_run: bool = False
 
@@ -53,6 +55,9 @@ class GateNode(Node):
         if not cmd:
             raise ValueError("gate 命令为空")
         cwd = str(execution.evaluate(self.cwd) or "") if self.cwd else None
+        # timeout_secs 经 DSL 传入时是表达式串（issue-pipeline v0.3 起 per-repo
+        # 门预算走 INPUT），必须求值——与 git_publish.merge_mode 同一批坑。
+        timeout_secs = int(execution.evaluate(self.timeout_secs) or 600)
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
         if dry:
             return {"passed": True, "gate": self.gate_name, "exit_code": 0,
@@ -65,7 +70,7 @@ class GateNode(Node):
         timed_out = False
         for attempt in range(1 + max(0, self.max_retries)):
             try:
-                stdout, stderr = proc.communicate(timeout=self.timeout_secs)
+                stdout, stderr = proc.communicate(timeout=timeout_secs)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 try:
