@@ -20,7 +20,7 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 | `report` | 结果通道 | run 级 jsonl 追加/读取（`<repo>/.flowcast/plaita-reports/<token>.jsonl`）：map 子流程与主流程聚合的旁路——绕开内核 map end 递归限制与 if 作用域隔离（workaround，内核侧追踪 [plaita#16](https://github.com/jeffkit/plaita/issues/16)） |
 | `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 进程内轮询回复（**阻塞版**，Normal 模式） |
 | `hitl_await` | 人工确认(挂起) | **挂起版**（Distributed 模式专用）：发消息即返回 `pending` 并快照挂起，外部 poller 轮询回复经 EventBus 唤醒——等微信回复期间进程可崩溃/重启（ADR phase 2） |
-| `notify` | 通知 | terminal 后端（stdout） |
+| `notify` | 通知 | backend 注册表分发（`channel`）：`terminal`（stdout）默认，或指向任何已注册通知 backend（`feishu_webhook` 等）；**新渠道走 `register_notify_backend`，不再新增节点** |
 | `writefile` | 写文件 | UTF-8 写文件，支持 JSON 序列化 |
 | `github_comment` | GitHub 评论 | 公开出害口收敛点：正文消毒（本机路径/密钥/未执行的 `$()` 命令替换打码）+ `dedup_marker` 去重（断点续跑不重发）+ `footer` 尾注 + artifact 留档；dry-run 写草稿不连网 |
 | `git_publish` | Git 发布 | 幂等 commit/push：有改动一律先 commit，远端头==本地头才跳过（重投不丢改动）；`merge_mode=main` 时 ff 合并 `origin/<branch>`（失败 abort 如实回报）；提交消息 `commit_message` > `plan_file` 的 `COMMIT_MESSAGE:` 行 > `fix: issue #N` |
@@ -55,6 +55,9 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 - 纯文本变换（判决提取、frontmatter 解析等）**不做节点**——注册为表达式
   `F.*` 函数（`ExpressionRegistry.register`），在 assignment 里一行使用。
 - 业务领域的状态机（如内容池销账）属于业务仓，不放本仓。
+- **通知类渠道接入走 backend，不加节点**：协议适配注册进 `notify_backends.NOTIFY_BACKENDS`
+  （先例 `DECISION_PROVIDERS`），节点层只留薄壳；webhook×4 / email_send 已是薄壳委托
+  （[plaita-nodes#1](https://github.com/jeffkit/plaita-nodes/issues/1)）。
 
 ## 快速上手
 
@@ -124,6 +127,7 @@ pytest
 
 ## 变更摘要
 
+- **0.8.0**（2026-09-30）：通知出口收敛——新增 `notify_backends.NOTIFY_BACKENDS` 注册表（先例 `DECISION_PROVIDERS`），协议适配（payload 组装/钉钉加签/SMTP）收进 backend；`webhook`×4 / `email_send` 改薄壳委托（DSL 兼容、输出形状不变，既有连接器测试全绿）；`notify.channel` 可指向任何已注册 backend（新渠道只加 backend 不加节点，[plaita-nodes#1](https://github.com/jeffkit/plaita-nodes/issues/1)）；`notify` 补 dry-run。
 - **0.7.0**（2026-09-30）：修复、契约收口与结构收敛。
   - *修复*：`gate.max_retries` 假重试（Popen 在循环外导致从未真正重跑，现每轮重新执行命令）；移除 `sql_query` 遗留调试输出（params 泄漏风险）；`hitl_poller` 缺 `os` import（默认 `--hitl-url` 路径 NameError）。
   - *dry-run 契约*：`webhooks`×4 / `generic_webhook` / `api_request` / `email_send` / `sql_query` 补齐——dry 下不解析凭据、不连网，返回带 `dry_run` 标记的 fake 结果。

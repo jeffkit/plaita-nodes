@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plaita-nodes"
-version = "0.7.0"
+version = "0.8.0"
 description = "plaita 通用节点集：Agent/LLM/决策原子 · 流程控制 · 出害口 · 凭据化连接器（22 节点）"
 readme = "README.md"
 requires-python = ">=3.10"

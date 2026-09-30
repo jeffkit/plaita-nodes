@@ -1,4 +1,4 @@
-"""邮件发送连接器：经 SMTP 发送（stdlib smtplib，无额外依赖）。
+"""邮件发送连接器（薄壳节点）：SMTP 协议适配在 notify_backends 注册表。
 
 凭据数据::
 
@@ -7,12 +7,11 @@
 """
 from __future__ import annotations
 
-import smtplib
-from email.message import EmailMessage
-from typing import Any, ClassVar, List
+from typing import Any, ClassVar
 
-from plaita.credentials import get_credential
-from plaita.node.basic import Node
+from plaita import Node
+
+from .notify_backends import get_notify_backend
 
 
 class EmailSendNode(Node):
@@ -29,40 +28,11 @@ class EmailSendNode(Node):
     dry_run: bool = False
 
     def execute(self, execution):
-        recipients: List[str] = execution.evaluate(self.to) or []
+        # dry-run 最先判：不解析凭据、不连 SMTP（收件人仍求值，dry 输出可检查）
+        recipients = execution.evaluate(self.to) or []
         if isinstance(recipients, str):
             recipients = [r.strip() for r in recipients.split(",") if r.strip()]
-        # dry-run 最先判：不解析凭据、不连 SMTP（返回 fake 结果便于检查流程形状）
         if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
             return {"status": "dry-run", "to": recipients, "dry_run": True}
-        if not self.credential:
-            raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
-        cred = get_credential(self.credential)
-        host = cred.get("host")
-        if not host:
-            raise ValueError(f"凭据 {self.credential!r} 缺少 host 字段")
-        port = int(cred.get("port", 465 if cred.get("use_ssl") else 587))
-
         body = str(execution.evaluate(self.body) or "")
-
-        msg = EmailMessage()
-        msg["From"] = cred.get("username") or "plaita"
-        msg["To"] = ", ".join(recipients)
-        msg["Subject"] = str(execution.evaluate(self.subject) or "")
-        msg.set_content(body)
-        if self.body_is_html:
-            msg.add_alternative(body, subtype="html")
-
-        if cred.get("use_ssl"):
-            smtp: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=20)
-        else:
-            smtp = smtplib.SMTP(host, port, timeout=20)
-        try:
-            if cred.get("use_tls") and not cred.get("use_ssl"):
-                smtp.starttls()
-            if cred.get("username") and cred.get("password"):
-                smtp.login(cred["username"], cred["password"])
-            smtp.send_message(msg)
-        finally:
-            smtp.quit()
-        return {"status": "sent", "to": recipients}
+        return get_notify_backend(self.node_type)(execution, self, body)

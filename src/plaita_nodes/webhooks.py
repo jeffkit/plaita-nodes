@@ -1,56 +1,30 @@
-"""IM Webhook 连接器：飞书 / 企业微信 / Slack 群机器人。
+"""IM Webhook 连接器：飞书 / 企业微信 / Slack / 钉钉群机器人（薄壳节点）。
 
-共同模式：凭据按名引用（credential 字段 → plaita.credentials 解密读取
-{"url": ...}），消息内容支持表达式（经 execution.evaluate 求值）。
-新增一个连接器 ≈ 30 行：子类化 _WebhookNode，声明 payload 组装即可。
+协议适配在 notify_backends 注册表（plaita-nodes#1：新通知渠道只加 backend、
+不加节点）；本模块只保留节点外壳（type/字段/dry-run），按节点 type 委托 backend。
 """
-import logging
-from typing import Any, ClassVar, Dict, Optional
+from __future__ import annotations
 
-import requests
-from pydantic import PrivateAttr
+from typing import Any, ClassVar
 
-from plaita.credentials import get_credential
-from plaita.node.basic import Node
+from plaita import Node
 
-_logger = logging.getLogger(__name__)
+from .notify_backends import get_notify_backend
 
 
 class _WebhookNode(Node):
-    """Webhook 连接器基类：credential 解析 + POST 消息 + 统一错误。"""
+    """Webhook 连接器基类：dry-run 判定 + text 求值 + 委托本节点 type 的 backend。"""
 
     credential: str = ""
     text: Any = None
     dry_run: bool = False
-
-    def _endpoint(self) -> str:
-        if not self.credential:
-            raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
-        cred = get_credential(self.credential)
-        url = cred.get("url")
-        if not url:
-            raise ValueError(f"凭据 {self.credential!r} 缺少 url 字段")
-        return url
-
-    def _payload(self, text: str) -> Dict[str, Any]:  # pragma: no cover - 子类实现
-        raise NotImplementedError
 
     def execute(self, execution):
         # dry-run 最先判：不解析凭据、不发请求（dry_run 本就用于无配置检查流程形状）
         if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
             return {"status": None, "response": "[dry-run] would post", "dry_run": True}
         text = str(execution.evaluate(self.text) or "")
-        url = self._endpoint()
-        resp = requests.post(url, json=self._payload(text), timeout=15)
-        ok = resp.status_code == 200
-        body = None
-        try:
-            body = resp.json()
-        except ValueError:
-            body = resp.text[:200]
-        if not ok:
-            raise RuntimeError(f"webhook 调用失败 HTTP {resp.status_code}: {body}")
-        return {"status": resp.status_code, "response": body}
+        return get_notify_backend(self.node_type)(execution, self, text)
 
 
 class FeishuWebhookNode(_WebhookNode):
@@ -59,18 +33,12 @@ class FeishuWebhookNode(_WebhookNode):
     node_type: ClassVar[str] = "feishu_webhook"
     node_name: ClassVar[str] = "飞书通知"
 
-    def _payload(self, text: str) -> Dict[str, Any]:
-        return {"msg_type": "text", "content": {"text": text}}
-
 
 class WecomWebhookNode(_WebhookNode):
     """企业微信群机器人：凭据数据为 {"url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."}"""
 
     node_type: ClassVar[str] = "wecom_webhook"
     node_name: ClassVar[str] = "企微通知"
-
-    def _payload(self, text: str) -> Dict[str, Any]:
-        return {"msgtype": "text", "text": {"content": text}}
 
 
 class SlackWebhookNode(_WebhookNode):
@@ -79,45 +47,11 @@ class SlackWebhookNode(_WebhookNode):
     node_type: ClassVar[str] = "slack_webhook"
     node_name: ClassVar[str] = "Slack 通知"
 
-    def _payload(self, text: str) -> Dict[str, Any]:
-        return {"text": text}
-
 
 class DingtalkWebhookNode(_WebhookNode):
-    """钉钉群机器人：凭据数据为 {"url": "https://oapi.dingtalk.com/robot/send?access_token=...",
-    "secret": "<加签密钥，可选>"}。配置了 secret 时自动加签（timestamp+HMAC-SHA256）。
+    """钉钉群机器人：凭据数据为 {"url": "...", "secret": "<加签密钥，可选>"}。
+    配置了 secret 时自动加签（timestamp+HMAC-SHA256）。协议适配见 notify_backends。
     """
 
     node_type: ClassVar[str] = "dingtalk_webhook"
     node_name: ClassVar[str] = "钉钉通知"
-
-    _credential_data: Dict[str, Any] = PrivateAttr(default_factory=dict)
-
-    def _endpoint(self) -> str:
-        url = super()._endpoint()
-        secret = self._credential_data.get("secret")
-        if not secret:
-            return url
-        import base64
-        import hashlib
-        import hmac
-        import time
-        import urllib.parse
-
-        ts = str(round(time.time() * 1000))
-        digest = hmac.new(
-            secret.encode(), f"{ts}\n{secret}".encode(), digestmod=hashlib.sha256
-        ).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(digest))
-        sep = "&" if "?" in url else "?"
-        return f"{url}{sep}timestamp={ts}&sign={sign}"
-
-    def execute(self, execution):
-        # dry-run 时不读凭据（交基类最先判的 dry 分支直接返回）
-        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
-            return super().execute(execution)
-        self._credential_data = get_credential(self.credential) if self.credential else {}
-        return super().execute(execution)
-
-    def _payload(self, text: str) -> Dict[str, Any]:
-        return {"msgtype": "text", "text": {"content": text}}

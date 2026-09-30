@@ -27,10 +27,11 @@ from .llm import LlmError, LlmNode
 from .rate_limit import RateLimitNode
 from .report import ReportNode, append_entry, read_entries
 from .notify import NotifyNode
+from .notify_backends import NOTIFY_BACKENDS, get_notify_backend, register_notify_backend
 from .webhooks import DingtalkWebhookNode, FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 _ALL_NODES = [AgentRunNode, GithubCommentNode, GitPublishNode, ParseJsonNode, ApiRequestNode, CaptureNode, DecisionNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
 
@@ -50,7 +51,7 @@ __all__ = [
     "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError",
     "DecisionNode", "DecisionError", "register_decision_provider", "DECISION_PROVIDERS",
     "ReportNode", "append_entry", "read_entries",
-    "NotifyNode",
+    "NotifyNode", "NOTIFY_BACKENDS", "register_notify_backend", "get_notify_backend",
     "WriteFileNode",
     "GithubCommentNode", "redact_text",
     "GitPublishNode",
