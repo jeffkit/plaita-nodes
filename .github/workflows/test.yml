@@ -3,6 +3,9 @@ name: Tests
 # push/PR 跑全量 pytest。plaita / agentproc 未发 PyPI，经兄弟仓 checkout 后
 # editable 安装（与大仓 monarbor clone 后的本地开发路径一致；两仓均为公开仓，
 # 匿名 checkout 即可）。credentials extra 提供 cryptography（凭据加解密测试用）。
+# 注意：兄弟仓必须 checkout 到 _siblings/ 下——python -m pytest 会把 CWD 插入
+# sys.path，若 checkout 到 ./plaita 会被当成 namespace package 遮蔽真 plaita
+# （ImportError: cannot import name 'Node' from 'plaita' (unknown location)）。
 on:
   push:
     branches: [main]
@@ -23,14 +26,14 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: jeffkit/plaita
-          path: plaita
+          path: _siblings/plaita
       - uses: actions/checkout@v6
         with:
           repository: jeffkit/agentproc
-          path: agentproc
+          path: _siblings/agentproc
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
-      - run: pip install -e "./plaita[http,credentials]" -e ./agentproc/sdk/python -e ".[dev,sql]"
+      - run: pip install -e "./_siblings/plaita[http,credentials]" -e ./_siblings/agentproc/sdk/python -e ".[dev,sql]"
       - run: python -m pytest -q
