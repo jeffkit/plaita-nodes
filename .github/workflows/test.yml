@@ -1,0 +1,36 @@
+name: Tests
+
+# push/PR 跑全量 pytest。plaita / agentproc 未发 PyPI，经兄弟仓 checkout 后
+# editable 安装（与大仓 monarbor clone 后的本地开发路径一致；两仓均为公开仓，
+# 匿名 checkout 即可）。credentials extra 提供 cryptography（凭据加解密测试用）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: jeffkit/plaita
+          path: plaita
+      - uses: actions/checkout@v6
+        with:
+          repository: jeffkit/agentproc
+          path: agentproc
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e "./plaita[http,credentials]" -e ./agentproc/sdk/python -e ".[dev,sql]"
+      - run: python -m pytest -q

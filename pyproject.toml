@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "plaita-nodes"
 version = "0.7.0"
-description = "plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Hitl / Notify / WriteFile"
+description = "plaita 通用节点集：Agent/LLM/决策原子 · 流程控制 · 出害口 · 凭据化连接器（22 节点）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyyaml"]
 sql = ["sqlalchemy>=2.0", "psycopg2-binary>=2.9", "pymysql>=1.1"]
+# decision provider=jevlike 的本地打分器：torch 是唯一可声明硬依赖；
+# jevlike 本体（jevlike.data/jevlike.model）经其仓安装（未上 PyPI，懒加载时给出提示）
+jevlike = ["torch>=2.0"]
 
 [project.entry-points."plaita.nodes"]
 agentrun = "plaita_nodes.agent_run:AgentRunNode"
