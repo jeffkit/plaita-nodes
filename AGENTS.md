@@ -27,6 +27,7 @@ agents/providers 配置，执行走 agentproc Python SDK）、本地命令、微
 - `src/plaita_nodes/decision.py` — DecisionNode + `DECISION_PROVIDERS` 注册表（`llm` / `jev` 过渡契约 / 自定义注册）
 - `src/plaita_nodes/agent_run.py` — AgentRunNode + `recursive-direct` executor（语义 = flowcast runRecursiveDirect）
 - `src/plaita_nodes/_hitl_client.py` — hitl/hitl_await 共享发送协议层（send/图片降级/解析，协议细节只改这里）
+- `src/plaita_nodes/hitl_poller.py` — Distributed 模式恢复桥（`python -m plaita_nodes.hitl_poller`，轮询 session → EventBus 发布 hitl_reply）
 - `src/plaita_nodes/{api,database,email,webhooks}.py` — 凭据化连接器（`credential` 字段 → plaita.credentials 解密读取）
 - `pyproject.toml` — `[project.entry-points."plaita.nodes"]` 注册表
 
