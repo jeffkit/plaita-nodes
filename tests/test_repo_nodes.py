@@ -441,3 +441,30 @@ def test_gate_timeout_secs_as_expression_string(tmp_path, monkeypatch):
     node2 = GateNode(id="gt2", command="true", gate_name="t", cwd=str(tmp_path),
                      timeout_secs=30)
     assert node2.execute(_FakeExec())["passed"] is True  # 字面 int 兼容不变
+
+
+def test_gate_retry_actually_reruns_command(tmp_path):
+    """max_retries 必须**重新执行命令**（历史 bug：Popen 在循环外，失败后从未重跑）。"""
+    from plaita_nodes.gate import GateNode
+
+    counter = tmp_path / "count"
+    script = (f"c=$(cat {counter} 2>/dev/null || echo 0); c=$((c+1)); "
+              f"echo $c > {counter}; exit $((2-c))")  # 第 1 次失败、第 2 次通过
+    node = GateNode(id="gt", command=["bash", "-c", script], gate_name="t",
+                    cwd=str(tmp_path), max_retries=2)
+    out = node.execute(_FakeExec())
+    assert out["passed"] is True
+    assert out["retries"] == 1                       # 重试 1 次后过
+    assert counter.read_text().strip() == "2"        # 命令确实被执行了 2 次
+
+
+def test_gate_retry_exhaustion_reports_true_attempt_count(tmp_path):
+    from plaita_nodes.gate import GateNode
+
+    counter = tmp_path / "count"
+    node = GateNode(id="gt", command=["bash", "-c", f"echo x >> {counter}; exit 7"],
+                    gate_name="t", cwd=str(tmp_path), max_retries=2)
+    out = node.execute(_FakeExec())
+    assert out["passed"] is False and out["exit_code"] == 7
+    assert out["retries"] == 2
+    assert len(counter.read_text().splitlines()) == 3  # 1 + 2 次重试全部真实执行

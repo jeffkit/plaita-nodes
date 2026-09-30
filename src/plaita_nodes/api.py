@@ -46,8 +46,12 @@ class GenericWebhookNode(Node):
     credential: str = ""
     payload: Any = None
     timeout_ms: int = 15000
+    dry_run: bool = False
 
     def execute(self, execution):
+        # dry-run 最先判：不解析凭据、不发请求
+        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
+            return {"status": None, "response": "[dry-run] would post", "dry_run": True}
         if not self.credential:
             raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
         url = get_credential(self.credential).get("url")
@@ -86,8 +90,12 @@ class ApiRequestNode(Node):
     body: Any = None
     timeout_ms: int = 15000
     raise_on_error: bool = True
+    dry_run: bool = False
 
     def execute(self, execution):
+        # dry-run 最先判：不解析凭据、不发请求
+        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
+            return {"status": None, "data": "[dry-run] would request", "dry_run": True}
         if not self.credential:
             raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
         cred = get_credential(self.credential)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import subprocess
 import time
 from typing import Any, ClassVar, Optional
@@ -28,7 +29,8 @@ class GateNode(Node):
     - ``gate_name``: 门名称（用于报告）
     - ``cwd``: 工作目录
     - ``timeout_secs``: 超时秒数（默认 600）
-    - ``max_retries``: 失败自动重试次数（默认 0）
+    - ``max_retries``: 失败自动重试次数（默认 0）；每次重试**重新执行命令**，
+      ``retries`` 输出实际重试次数（0 = 首次即过/未重试）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时返回 passed=True
 
     输出：``{"passed", "gate", "exit_code", "stdout", "stderr", "retries"}``。
@@ -64,17 +66,20 @@ class GateNode(Node):
                     "stdout": "[dry-run]", "stderr": "", "retries": 0, "dry_run": True}
 
         env = os.environ.copy()
-        proc = subprocess.Popen(cmd, cwd=cwd or None, env=env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
-        timed_out = False
-        for attempt in range(1 + max(0, self.max_retries)):
+        exit_code, stdout, stderr = 1, "", ""
+        attempts = 1 + max(0, self.max_retries)
+        for attempt in range(attempts):
+            # 每轮重新 Popen——重试语义 = 重新执行命令。（历史 bug：Popen 在
+            # 循环外，communicate 复用已退出进程，失败后从未真正重跑。）
+            proc = subprocess.Popen(cmd, cwd=cwd or None, env=env, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    start_new_session=True)
+            timed_out = False
             try:
                 stdout, stderr = proc.communicate(timeout=timeout_secs)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 try:
-                    import signal
                     os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass

@@ -7,6 +7,7 @@
 
 依赖：pip install plaita-nodes[sql]（sqlalchemy + 常用驱动）。
 SELECT 返回 {"rows": [...], "rowcount": n}；写操作返回 {"rowcount": n}。
+dry-run（节点字段或 globalContext.dry_run）直接返回 {"rows": [], "rowcount": 0, "dry_run": True}，不解析凭据不连库。
 """
 from __future__ import annotations
 
@@ -72,8 +73,12 @@ class SqlQueryNode(Node):
     credential: str = ""
     query: Any = None
     params: Optional[Dict[str, Any]] = None
+    dry_run: bool = False
 
     def execute(self, execution):
+        # dry-run 最先判：不解析凭据、不连库（params 可能含敏感值，dry 下不碰）
+        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
+            return {"rows": [], "rowcount": 0, "dry_run": True}
         if not self.credential:
             raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
         url = _compose_url(get_credential(self.credential))
@@ -84,7 +89,6 @@ class SqlQueryNode(Node):
             raise ValueError("query 为空")
         # params 逐值解析：整 dict 走 evaluate 在字面量场景会得到 None
         bind = {k: _resolve(execution, v) for k, v in (self.params or {}).items()}
-        import sys as _s; print('DBG self.params =', repr(self.params), 'bind =', repr(bind), file=_s.stderr)
 
         engine = _get_engine(url)
         with engine.begin() as conn:

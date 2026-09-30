@@ -21,6 +21,7 @@ class _WebhookNode(Node):
 
     credential: str = ""
     text: Any = None
+    dry_run: bool = False
 
     def _endpoint(self) -> str:
         if not self.credential:
@@ -35,6 +36,9 @@ class _WebhookNode(Node):
         raise NotImplementedError
 
     def execute(self, execution):
+        # dry-run 最先判：不解析凭据、不发请求（dry_run 本就用于无配置检查流程形状）
+        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
+            return {"status": None, "response": "[dry-run] would post", "dry_run": True}
         text = str(execution.evaluate(self.text) or "")
         url = self._endpoint()
         resp = requests.post(url, json=self._payload(text), timeout=15)
@@ -109,6 +113,9 @@ class DingtalkWebhookNode(_WebhookNode):
         return f"{url}{sep}timestamp={ts}&sign={sign}"
 
     def execute(self, execution):
+        # dry-run 时不读凭据（交基类最先判的 dry 分支直接返回）
+        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
+            return super().execute(execution)
         self._credential_data = get_credential(self.credential) if self.credential else {}
         return super().execute(execution)
 

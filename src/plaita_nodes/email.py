@@ -26,8 +26,15 @@ class EmailSendNode(Node):
     subject: str = ""
     body: Any = None
     body_is_html: bool = False
+    dry_run: bool = False
 
     def execute(self, execution):
+        recipients: List[str] = execution.evaluate(self.to) or []
+        if isinstance(recipients, str):
+            recipients = [r.strip() for r in recipients.split(",") if r.strip()]
+        # dry-run 最先判：不解析凭据、不连 SMTP（返回 fake 结果便于检查流程形状）
+        if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
+            return {"status": "dry-run", "to": recipients, "dry_run": True}
         if not self.credential:
             raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
         cred = get_credential(self.credential)
@@ -36,9 +43,6 @@ class EmailSendNode(Node):
             raise ValueError(f"凭据 {self.credential!r} 缺少 host 字段")
         port = int(cred.get("port", 465 if cred.get("use_ssl") else 587))
 
-        recipients: List[str] = execution.evaluate(self.to) or []
-        if isinstance(recipients, str):
-            recipients = [r.strip() for r in recipients.split(",") if r.strip()]
         body = str(execution.evaluate(self.body) or "")
 
         msg = EmailMessage()

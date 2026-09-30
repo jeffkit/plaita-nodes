@@ -89,4 +89,5 @@ pytest
 
 ## 变更摘要
 
+- **0.6.1**（2026-09-30）：修复与契约收口——`gate.max_retries` 假重试修真（Popen 移入循环，每轮重新执行命令）；移除 `sql_query` 遗留调试输出（params 泄漏风险）；`webhooks`×4 / `generic_webhook` / `api_request` / `email_send` / `sql_query` 补齐 dry-run 契约（先于凭据解析，不连网）；`__all__` 漂移修复并补齐新节点导出，新增 entry-points↔`_ALL_NODES`↔`__all__` 一致性守卫测试；补 rate_limit / report / gate 重试测试。
 - **0.6.0**（2026-09-29）：新增 `github_comment` / `git_publish` / `parse_json` 三节点——出害口消毒+去重、幂等发布、LLM 输出健壮解析（issue-pipeline #43 解析策略沉淀）。修复 `__version__` 漂移（0.4.0 → 与 pyproject 同步）。

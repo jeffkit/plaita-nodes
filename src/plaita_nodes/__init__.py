@@ -30,7 +30,7 @@ from .notify import NotifyNode
 from .webhooks import DingtalkWebhookNode, FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 _ALL_NODES = [AgentRunNode, GithubCommentNode, GitPublishNode, ParseJsonNode, ApiRequestNode, CaptureNode, DecisionNode, DingtalkWebhookNode, EmailSendNode, FeishuWebhookNode, GateNode, GenericWebhookNode, HitlAwaitNode, HitlNode, LlmNode, NotifyNode, RateLimitNode, ReportNode, SlackWebhookNode, SqlQueryNode, WecomWebhookNode, WriteFileNode]
 
@@ -49,12 +49,15 @@ __all__ = [
     "CaptureNode", "CaptureConfigError",
     "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError",
     "DecisionNode", "DecisionError", "register_decision_provider", "DECISION_PROVIDERS",
-    "ReportNode", "report_append", "report_read",
+    "ReportNode", "append_entry", "read_entries",
     "NotifyNode",
     "WriteFileNode",
     "GithubCommentNode", "redact_text",
     "GitPublishNode",
     "ParseJsonNode",
+    "GateNode", "RateLimitNode",
+    "ApiRequestNode", "GenericWebhookNode", "SqlQueryNode", "EmailSendNode",
+    "FeishuWebhookNode", "WecomWebhookNode", "SlackWebhookNode", "DingtalkWebhookNode",
     "register_all",
     "load_merged_config", "resolve_agent", "resolve_provider", "interpolate",
     "AgentConfigError", "EXECUTOR_ALIASES",

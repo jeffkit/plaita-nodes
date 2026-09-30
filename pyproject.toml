@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plaita-nodes"
-version = "0.6.0"
+version = "0.6.1"
 description = "plaita 通用节点集：AgentRun（经 agentproc）/ Capture / Hitl / Notify / WriteFile"
 readme = "README.md"
 requires-python = ">=3.10"

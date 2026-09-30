@@ -203,3 +203,22 @@ def test_email_send_via_smtp(monkeypatch, tmp_path):
     assert sent["host"] == "smtp.test" and sent["tls"] is True
     assert sent["msg"]["To"] == "a@x.com, b@x.com"
     assert sent["msg"]["Subject"] == "告警"
+
+
+# ---- dry-run 契约（AGENTS.md：有副作用的节点一律尊重 globalContext.dry_run）----
+
+_DRY_RUN_NODE_TYPES = [
+    "feishu_webhook", "wecom_webhook", "slack_webhook", "dingtalk_webhook",
+    "generic_webhook", "api_request", "email_send", "sql_query",
+]
+
+
+@pytest.mark.parametrize("node_type", _DRY_RUN_NODE_TYPES)
+def test_connectors_respect_dry_run(node_type):
+    """dry_run 下：不解析凭据（无凭据也不报错）、不连网，返回带 dry_run 标记的 fake 结果。"""
+    from fake_exec import FakeExecution
+
+    cls = {c.node_type: c for c in plaita_nodes._ALL_NODES}[node_type]
+    node = cls(id="n", credential="")  # 故意不配 credential——dry 分支必须先于凭据解析
+    out = node.execute(FakeExecution({"dry_run": True}))
+    assert out.get("dry_run") is True
