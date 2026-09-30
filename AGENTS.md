@@ -7,8 +7,9 @@
 
 ## 项目概述
 
-为 plaita 流程提供"接到真实世界"的通用节点：Agent CLI 调用（复用 flowcast 的
-agents/providers 配置，执行走 agentproc Python SDK）、本地命令、微信 HITL、通知、
+为 plaita 流程提供"接到真实世界"的通用节点：Agent CLI 调用（agents/providers 配置
+见 `config.py`——plaita 原生目录优先、遗留 flowcast 目录兜底，执行走 agentproc Python SDK）、
+本地命令、微信 HITL、通知、
 写文件，以及凭据化外部系统连接器（REST / SQL / 邮件 / IM webhook）与流程控制原子
 （质量门 / 限频 / run 级结果通道）。业务粘接节点（读 persona/pool 等）**不放本仓**，
 放业务仓（如 mediaflow/plaita_flows）。
@@ -18,11 +19,12 @@ agents/providers 配置，执行走 agentproc Python SDK）、本地命令、微
 
 ## 架构地图
 
-依赖方向：`config.py`（flowcast 兼容配置层）← `agent_run.py`（agentproc executor 注册 + 节点）← 其余节点独立。
+依赖方向：`config.py`（agents/providers 配置层：`~/.plaita → <repo>/.plaita` 优先，
+`~/.flowx → ~/.flowcast → <repo>/.flowcast` 遗留兜底）← `agent_run.py`（agentproc executor 注册 + 节点）← 其余节点独立。
 对 plaita 只依赖 `plaita.Node` 基类与 `NodeExecutionContext` 窄接口；对 agentproc 只依赖 `runner.run` + `EXECUTORS` 注册表。
 
 关键路径：
-- `src/plaita_nodes/config.py` — agents/providers 加载（flowcast 搜索顺序 + 深合并 + `${VAR}` 插值 + provider→env 翻译）
+- `src/plaita_nodes/config.py` — agents/providers 加载（plaita 原生 + 遗留 flowcast 搜索顺序 + 深合并 + `${VAR}` 插值 + provider→env 翻译）
 - `src/plaita_nodes/llm.py` — LlmNode + `resolve_llm_endpoint`（端点三级回退：字段 > provider bundle > LLM_* env，供 decision 复用）
 - `src/plaita_nodes/decision.py` — DecisionNode + `DECISION_PROVIDERS` 注册表（`llm` / `jev` 过渡契约 / 自定义注册）
 - `src/plaita_nodes/agent_run.py` — AgentRunNode + `recursive-direct` executor（语义 = flowcast runRecursiveDirect）

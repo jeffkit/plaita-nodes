@@ -1,7 +1,8 @@
-"""flowcast 兼容的 agents/providers 配置加载。
+"""plaita 的 agents/providers 配置加载（遗留 flowcast 兼容层见下）。
 
-与 flowcast 的 provider.js / executor.js 保持同构：
-- 搜索顺序 ``~/.flowx → ~/.flowcast → <repo>/.flowcast``，后者深合并覆盖前者；
+- 搜索顺序：``~/.plaita → <repo>/.plaita``（plaita 原生，同名校验以此为准）
+  → ``~/.flowx → ~/.flowcast → <repo>/.flowcast``（遗留回退；flowcast 引擎已废弃，
+  仅供存量 agent/provider 名在迁移期继续解析），后者深合并覆盖前者；
 - ``${VAR}`` 环境变量插值，缺失 fail-fast；
 - provider bundle 翻译为各执行器的 env（recursive / claude）。
 
@@ -24,9 +25,14 @@ class AgentConfigError(RuntimeError):
 
 
 def _candidate_dirs(repo: Optional[str]) -> list[Path]:
+    # plaita 原生目录排后 = 深合并时覆盖遗留 flowcast 同名配置（迁移语义：
+    # 新定义写 ~/.plaita，旧 ~/.flowcast 只兜存量名，不再新增）
     dirs = [Path.home() / ".flowx", Path.home() / ".flowcast"]
     if repo:
         dirs.append(Path(repo) / ".flowcast")
+    dirs.append(Path.home() / ".plaita")
+    if repo:
+        dirs.append(Path(repo) / ".plaita")
     return dirs
 
 
@@ -54,7 +60,7 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 
 def load_merged_config(basename: str, repo: Optional[str] = None) -> Dict[str, Any]:
-    """按 flowcast 顺序加载并深合并一个配置名（如 agents / providers）。"""
+    """按 plaita→遗留 flowcast 顺序加载并深合并一个配置名（如 agents / providers）。"""
     merged: Dict[str, Any] = {}
     for directory in _candidate_dirs(repo):
         if not directory.is_dir():

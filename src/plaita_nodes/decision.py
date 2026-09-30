@@ -128,7 +128,8 @@ _LLM_SYSTEM_BATCH = (
 
 def _provider_llm(*, question: Any, choices: list[dict], input: Any, items: Optional[list],
                   api_base: Optional[str], api_key: Optional[str],
-                  model: Optional[str], timeout_secs: int) -> dict:
+                  model: Optional[str], timeout_secs: int,
+                  extra_body: Optional[dict] = None) -> dict:
     base, key, resolved_model = resolve_llm_endpoint(api_base, api_key, model)
     lines = [f"- {c['value']}" + (f"：{c['description']}" if c["description"] else "")
              for c in choices]
@@ -149,11 +150,14 @@ def _provider_llm(*, question: Any, choices: list[dict], input: Any, items: Opti
                          f"## 候选决策\n" + "\n".join(lines) + "\n\n"
                          f"## 待判定内容\n{_render_payload(input)}")},
         ]
+    body: dict = {"model": resolved_model, "messages": messages,
+                  "temperature": 0.0,
+                  "response_format": {"type": "json_object"}}
+    if extra_body:
+        body.update(extra_body)
     resp = requests.post(f"{base}/chat/completions",
                          headers={"Authorization": f"Bearer {key}"},
-                         json={"model": resolved_model, "messages": messages,
-                               "temperature": 0.0,
-                               "response_format": {"type": "json_object"}},
+                         json=body,
                          timeout=timeout_secs)
     if resp.status_code >= 400:
         raise DecisionError(f"LLM 决策请求失败 {resp.status_code}: {resp.text[:300]}")
@@ -353,6 +357,9 @@ class DecisionNode(Node):
     - ``api_base`` / ``api_key`` / ``model``: 端点覆盖（llm 端点另有 provider
       bundle 与 LLM_* 环境变量回退；jev 端点另有 JEV_API_BASE/KEY；
       jevlike 的 model = checkpoint 路径）
+    - ``extra_body``: 附加请求体字段（dict，仅 llm provider 生效，原样合并进
+      /chat/completions 请求体——如 ``{"reasoning_effort": "low"}`` 控制始终
+      思考模型的思考档位）
     - ``min_confidence``: 置信阈值（批量模式逐项生效）；低于时该项
       ``low_confidence=True`` 并按 ``on_low_confidence`` 处理：
       ``passthrough``（默认，仅标记）/ ``default``（取 ``default_choice``）/
@@ -375,6 +382,7 @@ class DecisionNode(Node):
     api_base: Optional[Any] = None
     api_key: Optional[Any] = None
     model: Optional[Any] = None
+    extra_body: Optional[Any] = None
     timeout_secs: int = Field(default=30)
     min_confidence: Optional[float] = None
     on_low_confidence: Literal["passthrough", "default", "error"] = "passthrough"
@@ -413,14 +421,17 @@ class DecisionNode(Node):
         if fn is None:
             raise DecisionError(f"decision provider {provider_name!r} 未注册"
                                 f"（已注册：{sorted(DECISION_PROVIDERS)}）")
-        out = fn(question=ev(self.question),
-                 choices=choices,
-                 input=ev(self.input),
-                 items=None,
-                 api_base=ev(self.api_base),
-                 api_key=ev(self.api_key),
-                 model=ev(self.model),
-                 timeout_secs=self.timeout_secs)
+        kwargs = dict(question=ev(self.question),
+                      choices=choices,
+                      input=ev(self.input),
+                      items=None,
+                      api_base=ev(self.api_base),
+                      api_key=ev(self.api_key),
+                      model=ev(self.model),
+                      timeout_secs=self.timeout_secs)
+        if provider_name == "llm" and self.extra_body is not None:
+            kwargs["extra_body"] = ev(self.extra_body)
+        out = fn(**kwargs)
 
         choice, confidence = self._checked(out, choices)
         low = self.min_confidence is not None and confidence < float(self.min_confidence)
@@ -450,14 +461,17 @@ class DecisionNode(Node):
         if fn is None:
             raise DecisionError(f"decision provider {provider_name!r} 未注册"
                                 f"（已注册：{sorted(DECISION_PROVIDERS)}）")
-        out = fn(question=ev(self.question),
-                 choices=choices,
-                 input=None,
-                 items=items,
-                 api_base=ev(self.api_base),
-                 api_key=ev(self.api_key),
-                 model=ev(self.model),
-                 timeout_secs=self.timeout_secs)
+        kwargs = dict(question=ev(self.question),
+                      choices=choices,
+                      input=None,
+                      items=items,
+                      api_base=ev(self.api_base),
+                      api_key=ev(self.api_key),
+                      model=ev(self.model),
+                      timeout_secs=self.timeout_secs)
+        if provider_name == "llm" and self.extra_body is not None:
+            kwargs["extra_body"] = ev(self.extra_body)
+        out = fn(**kwargs)
         entries = out.get("results")
         if not isinstance(entries, list) or len(entries) != len(items):
             raise DecisionError(

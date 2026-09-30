@@ -87,6 +87,9 @@ class LlmNode(Node):
     temperature: float = 0.2
     max_tokens: Optional[Any] = None
     json_mode: bool = False
+    # 附加请求体字段（dict，原样合并进 /chat/completions 请求体，
+    # 如 {"reasoning_effort": "low"} 控制始终思考模型的思考档位）
+    extra_body: Optional[Any] = None
     timeout_secs: int = Field(default=120)
     dry_run: bool = False
 
@@ -121,6 +124,10 @@ class LlmNode(Node):
             body["max_tokens"] = int(execution.evaluate(self.max_tokens))
         if self.json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self.extra_body is not None:
+            merged = execution.evaluate(self.extra_body)
+            if isinstance(merged, dict):
+                body.update(merged)
 
         resp = requests.post(f"{api_base}/chat/completions",
                              headers={"Authorization": f"Bearer {api_key}"},
