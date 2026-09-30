@@ -4,6 +4,9 @@
 节点按同一 token 读取——绕开两个内核限制：map 子流程 end 的表达式递归限制、
 if 块内赋值对块外不可见的作用域隔离。
 
+**这是 workaround**：内核修复后业务流程应迁回原生表达、本节点降级/移除——
+追踪 jeffkit/plaita#16。
+
 文件布局：``<base_dir>/<token>.jsonl``，每行一个 JSON 对象。
 base_dir 默认 ``<repo>/.flowcast/plaita-reports/``，可用 ``base_dir`` 字段覆盖。
 """

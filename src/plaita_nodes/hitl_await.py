@@ -12,15 +12,14 @@
 """
 from __future__ import annotations
 
-import os
 from typing import Any, ClassVar, Optional
 
-import requests
 from pydantic import Field
 
 from plaita import Node
 
-from .hitl import HitlError
+from ._hitl_client import resolve_base_url, resolve_timeout_secs, send_message
+from .hitl import HitlError  # noqa: F401  (再导出，保持既有导入路径)
 
 EVENT_TYPE = "hitl_reply"
 
@@ -50,45 +49,19 @@ class HitlAwaitNode(Node):
     event_filter: dict = Field(default_factory=dict)
     dry_run: bool = False
 
-    # ── 内部：消息发送（与 HitlNode 共用语义）─────────────────────
-    def _send(self, message: str, images: list, base: str, timeout_secs: int) -> str:
-        image_failed = False
-        if images:
-            try:
-                probe = requests.post(f"{base}/api/send", json={
-                    "message": "（图片见下）", "images": images,
-                    "wait_reply": False, "upstream": "ilink",
-                }, timeout=15)
-                if not probe.json().get("success"):
-                    image_failed = True
-            except requests.RequestException:
-                image_failed = True
-        if image_failed:
-            message += "\n\n⚠️ 封面图发送失败（媒体窗口过期）：请先给 bot 发任意一条消息后说\"重发图\"。"
-        resp = requests.post(f"{base}/api/send", json={
-            "message": message, "wait_reply": True,
-            "timeout": timeout_secs, "upstream": "ilink",
-        }, timeout=30)
-        payload = resp.json()
-        if not payload.get("success"):
-            raise HitlError(f"hitl-server 发送失败: {payload.get('error') or payload}")
-        return str(payload.get("session_id") or "")
+    # ── 发送协议走 _hitl_client 共享层（与 HitlNode 一致，含图片探路降级）──
 
     def execute(self, execution: Any) -> dict:
         message = str(execution.evaluate(self.message) or "")
         images = execution.evaluate(self.images) if self.images is not None else []
-        base = (str(execution.evaluate(self.base_url)) if self.base_url
-                else os.environ.get("HITL_URL", "http://127.0.0.1:8081")).rstrip("/")
-        try:
-            timeout_secs = int(execution.evaluate(self.timeout_secs))
-        except (TypeError, ValueError):
-            timeout_secs = 3600
+        base = resolve_base_url(execution, self.base_url)
+        timeout_secs = resolve_timeout_secs(execution, self.timeout_secs)
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
 
         if dry:
             return {"status": "pending", "session_id": "dryrun",
                     "replies": [], "dry_run": True}
-        session_id = self._send(message, [str(i) for i in images], base, timeout_secs)
+        session_id = send_message(base, message, [str(i) for i in images], timeout_secs)
         # 供外部 poller 定位：session → execution 映射由调用方持久化
         execution.set_state(f"{execution.express_prefix}HITL_SESSION", session_id)
         return {"status": "pending", "session_id": session_id,

@@ -1,6 +1,9 @@
 """RateLimitNode / ReportNode 单测（此前零覆盖）。"""
 from __future__ import annotations
 
+import json
+import threading
+
 from fake_exec import FakeExecution
 
 from plaita_nodes.rate_limit import RateLimitNode
@@ -28,6 +31,47 @@ def test_rate_limit_check_record_clear(tmp_path):
     RateLimitNode(id="x", action="clear", key="xhs",
                   store_dir=str(tmp_path)).execute(ex)
     assert check.execute(ex)["allowed"] is True
+
+
+def test_rate_limit_acquire_is_atomic_check_and_record(tmp_path):
+    """acquire：判定+占坑一个临界区；拒绝时不记账。"""
+    ex = FakeExecution()
+    acquire = RateLimitNode(id="a", action="acquire", key="pub", daily=1, weekly=5,
+                            store_dir=str(tmp_path))
+
+    first = acquire.execute(ex)
+    assert first["allowed"] is True and first["recorded"] is True
+    assert first["today_count"] == 1          # 返回占坑后的计数
+
+    second = acquire.execute(ex)
+    assert second["allowed"] is False and second["recorded"] is False
+    assert second["today_count"] == 1         # 拒绝不多记
+
+    # 落盘恰好 1 条时间戳
+    stamps = json.loads((tmp_path / "pub.json").read_text())
+    assert len(stamps) == 1
+
+
+def test_rate_limit_acquire_threaded_no_overshoot(tmp_path):
+    """8 线程并发 acquire，daily=3：恰好放行 3 个（flock 互斥生效）。"""
+    ex = FakeExecution()
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    def _hit():
+        node = RateLimitNode(id="a", action="acquire", key="race", daily=3, weekly=99,
+                             store_dir=str(tmp_path))
+        ok = node.execute(ex)["allowed"]
+        with lock:
+            results.append(ok)
+
+    threads = [threading.Thread(target=_hit) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results.count(True) == 3
 
 
 # ---- report ----

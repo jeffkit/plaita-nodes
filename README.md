@@ -1,6 +1,8 @@
 # plaita-nodes
 
-plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到真实世界——Agent CLI、本地命令、微信人工确认、通知、文件。
+plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到真实世界——Agent CLI、
+本地命令、微信人工确认、通知、文件，以及 REST API / SQL / 邮件 / IM webhook 等
+外部系统，外加 gate / rate_limit / report 等流程控制原子。
 
 > 背景：[ADR-2026-08-27 编排双轨收敛](../docs/ADR-2026-08-27-orchestration-converge-on-plaita.md)
 > ——编排内核收敛到 plaita，Agent 执行层统一走 agentproc；本仓是这层决议的节点承载。
@@ -13,12 +15,28 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 | `llm` | LLM 补全 | **LLM 原子**：单次 chat/completions 生成文本（OpenAI 兼容端点）。与 agentrun 的边界见下 |
 | `decision` | 结构化决策 | **决策原子**：封闭决策空间 → 类型化选择 + 置信度。单条（`input`）或批量（`items`，provider 单次调用逐项判定，适合快照剪枝/批量预筛）。provider 可插拔：`llm` / `jev`（官方 Jev 与自托管 [OpenJev](https://github.com/razorback16/openjev) 同说的 `/v1/systemone` 线协议）/ `jevlike`（本地打分器，`model`=checkpoint 路径，懒加载 torch）/ 自定义注册；低于阈值可标记/走默认项/抛错升级 HITL |
 | `capture` | 命令执行 | 跑本地命令捕获输出；失败不抛错（`exit_code` 返回，流程自行分支） |
-| `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 轮询回复 |
+| `gate` | 质量门 | 验证命令语义化为 `passed` 布尔（对标 flowcast runGate）；`max_retries` 失败自动**重跑命令**；超时 kill 进程组返回 `exit_code=124` |
+| `rate_limit` | 频率限制 | 文件计数器按 key 日/周限次（`check`/`record`/`clear`）；`acquire` 原子判定+占坑（flock 互斥），check/record 两步间不会 crash/并发双发 |
+| `report` | 结果通道 | run 级 jsonl 追加/读取（`<repo>/.flowcast/plaita-reports/<token>.jsonl`）：map 子流程与主流程聚合的旁路——绕开内核 map end 递归限制与 if 作用域隔离（workaround，内核侧追踪 [plaita#16](https://github.com/jeffkit/plaita/issues/16)） |
+| `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 进程内轮询回复（**阻塞版**，Normal 模式） |
+| `hitl_await` | 人工确认(挂起) | **挂起版**（Distributed 模式专用）：发消息即返回 `pending` 并快照挂起，外部 poller 轮询回复经 EventBus 唤醒——等微信回复期间进程可崩溃/重启（ADR phase 2） |
 | `notify` | 通知 | terminal 后端（stdout） |
 | `writefile` | 写文件 | UTF-8 写文件，支持 JSON 序列化 |
 | `github_comment` | GitHub 评论 | 公开出害口收敛点：正文消毒（本机路径/密钥/未执行的 `$()` 命令替换打码）+ `dedup_marker` 去重（断点续跑不重发）+ `footer` 尾注 + artifact 留档；dry-run 写草稿不连网 |
 | `git_publish` | Git 发布 | 幂等 commit/push：有改动一律先 commit，远端头==本地头才跳过（重投不丢改动）；`merge_mode=main` 时 ff 合并 `origin/<branch>`（失败 abort 如实回报）；提交消息 `commit_message` > `plan_file` 的 `COMMIT_MESSAGE:` 行 > `fix: issue #N` |
 | `parse_json` | JSON 解析 | LLM 结构化输出解析：逐行倒序找严格 JSON → rfind 切片兜底（正文带花括号不误杀）；`choices` verdict 白名单、`default` fail-safe 兜底（`parse_ok`/`parse_error` 明细）、`join_fields` 列表拼接 |
+| `api_request` | API 请求 | REST 连接器：凭据提供 `base_url` + 静态鉴权头，节点描述 method/path/query/body（path 支持表达式）——覆盖「静态 Header 鉴权」的开放 API，无需逐 SaaS 写节点 |
+| `generic_webhook` | Webhook 调用 | 任意 JSON payload POST 到凭据指定 URL |
+| `sql_query` | SQL 查询 | SQLAlchemy 任意库（凭据给 `url` 或 host/port/user/password/database 全集）；`:param` 绑定防注入；可选依赖 `pip install plaita-nodes[sql]` |
+| `email_send` | 邮件发送 | SMTP（stdlib，无额外依赖）；凭据给 host/port/username/password/use_ssl/use_tls |
+| `feishu_webhook` | 飞书通知 | IM 群机器人 webhook，凭据给 `{"url": ...}` |
+| `wecom_webhook` | 企微通知 | IM 群机器人 webhook，凭据同上 |
+| `slack_webhook` | Slack 通知 | IM 群机器人 webhook，凭据同上 |
+| `dingtalk_webhook` | 钉钉通知 | IM 群机器人 webhook，凭据可带 `secret` 自动加签（timestamp+HMAC-SHA256） |
+
+连接器族（`api_request` 起的 8 行）经 `credential` 字段按名引用，plaita.credentials
+解密读取（编排台「凭据」页创建）。hitl/hitl_await 共享发送协议层
+（`_hitl_client.py`）：发消息/图片降级细节一处维护。
 
 节点经 pyproject 的 `[project.entry-points."plaita.nodes"]` 自动注册；`plaita_nodes.register_all()` 可手动注册。
 
@@ -76,8 +94,8 @@ JSON 用法示例（agentrun + 模板表达式）：
 ## 设计边界
 
 - **安全**：任何日志不打 apiKey / ANTHROPIC_AUTH_TOKEN。
-- **dry-run**：所有有副作用的节点尊重 `globalContext.dry_run`——agentrun/capture/hitl 返回 fake 结果，writefile 照常写（草稿便于检查）。
-- **断点续跑**：hitl 为阻塞版（Normal 模式）；崩溃级恢复走 plaita Distributed + EventNode 模式（见 ADR phase 2）。
+- **dry-run**：所有有副作用的节点尊重 `globalContext.dry_run`——agentrun/capture/gate/hitl/hitl_await 与全部连接器（webhook×4 / generic_webhook / api_request / sql_query / email_send）dry 下**不解析凭据、不连网**，返回带 `dry_run` 标记的 fake 结果；writefile 照常写（草稿便于检查）。
+- **断点续跑**：hitl 为阻塞版（Normal 模式），`hitl_await` 为挂起版（Distributed 模式 + 外部 poller，ADR phase 2）；崩溃级恢复走 plaita Distributed + EventNode 模式。
 - 新增执行器：在 `agentproc` executor 层扩展 + `config.EXECUTOR_ALIASES` 加映射，本仓节点无需改动。
 
 ## 开发
@@ -89,5 +107,11 @@ pytest
 
 ## 变更摘要
 
-- **0.6.1**（2026-09-30）：修复与契约收口——`gate.max_retries` 假重试修真（Popen 移入循环，每轮重新执行命令）；移除 `sql_query` 遗留调试输出（params 泄漏风险）；`webhooks`×4 / `generic_webhook` / `api_request` / `email_send` / `sql_query` 补齐 dry-run 契约（先于凭据解析，不连网）；`__all__` 漂移修复并补齐新节点导出，新增 entry-points↔`_ALL_NODES`↔`__all__` 一致性守卫测试；补 rate_limit / report / gate 重试测试。
+- **0.7.0**（2026-09-30）：修复、契约收口与结构收敛。
+  - *修复*：`gate.max_retries` 假重试（Popen 在循环外导致从未真正重跑，现每轮重新执行命令）；移除 `sql_query` 遗留调试输出（params 泄漏风险）。
+  - *dry-run 契约*：`webhooks`×4 / `generic_webhook` / `api_request` / `email_send` / `sql_query` 补齐——dry 下不解析凭据、不连网，返回带 `dry_run` 标记的 fake 结果。
+  - *结构*：新增 `_hitl_client.py` 共享发送协议层，hitl / hitl_await 去重 ~30 行（HitlError 移至该层，`.hitl` 保持再导出）。
+  - *功能*：`rate_limit` 新增 `acquire` 原子 check+record（flock 互斥），check/record 两步间不再 crash/并发双发。
+  - *守卫*：`__all__` 漂移修复（`report_append`→`append_entry`）并补齐新节点导出；新增 pyproject entry-points ↔ `_ALL_NODES` ↔ `__all__` 一致性测试；补 rate_limit / report / gate 重试测试；README 节点表补全 22 节点。
+  - *追踪*：`report` 节点的内核 workaround 状态立案 [plaita#16](https://github.com/jeffkit/plaita/issues/16)。
 - **0.6.0**（2026-09-29）：新增 `github_comment` / `git_publish` / `parse_json` 三节点——出害口消毒+去重、幂等发布、LLM 输出健壮解析（issue-pipeline #43 解析策略沉淀）。修复 `__version__` 漂移（0.4.0 → 与 pyproject 同步）。

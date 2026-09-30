@@ -1,32 +1,31 @@
 """HitlNode —— 直连 hitl-server 的微信人工确认（对标 mediaflow scripts/hitl.js）。
 
-协议（iLink 通道）：
-- ``POST {base}/api/send``  body ``{message, wait_reply, timeout, upstream:'ilink'}``
-  → ``{success, session_id, error}``
-- 轮询 ``GET {base}/api/poll/{session_id}`` → ``{has_reply, replies:[{content|text}], status}``
-- 到 deadline 返回 ``status='timeout'`` 而非抛错（与 hitl.js 一致）；
-  send 失败（success=false）才抛 HitlError。
+协议与发送/图片降级细节见 ``_hitl_client.py``（与 HitlAwaitNode 共享）；
+本节点是**阻塞版**（Normal 模式 execute 内轮询到底）。
 
-图片：先发 ``wait_reply=false`` 的探路消息，失败在正文附加降级提示（hitl.js parity）。
+到 deadline 返回 ``status='timeout'`` 而非抛错（与 hitl.js 一致）；
+send 失败（success=false）才抛 HitlError。
 
 断点续跑说明：本节点是阻塞版（Normal 模式直接轮询到底）。崩溃级恢复
-（挂起快照 + 事件恢复）由 plaita Distributed 模式的 EventNode 模式承接，
+（挂起快照 + 事件恢复）由 ``hitl_await``（Distributed 模式）承接，
 见 ADR-2026-08-27 试点方案的 phase 2。
 """
 from __future__ import annotations
 
-import os
 import time
-from typing import Any, ClassVar, List, Optional
+from typing import Any, ClassVar, Optional
 
 import requests
 from pydantic import Field
 
 from plaita import Node
 
-
-class HitlError(RuntimeError):
-    pass
+from ._hitl_client import (  # noqa: F401  (HitlError 再导出，保持既有导入路径)
+    HitlError,
+    resolve_base_url,
+    resolve_timeout_secs,
+    send_message,
+)
 
 
 class HitlNode(Node):
@@ -57,12 +56,8 @@ class HitlNode(Node):
     def execute(self, execution: Any) -> dict:
         message = str(execution.evaluate(self.message) or "")
         images = execution.evaluate(self.images) if self.images is not None else []
-        base = (str(execution.evaluate(self.base_url)) if self.base_url
-                else os.environ.get("HITL_URL", "http://127.0.0.1:8081")).rstrip("/")
-        try:
-            timeout_secs = int(execution.evaluate(self.timeout_secs))
-        except (TypeError, ValueError):
-            timeout_secs = 3600
+        base = resolve_base_url(execution, self.base_url)
+        timeout_secs = resolve_timeout_secs(execution, self.timeout_secs)
         try:
             poll_interval = float(execution.evaluate(self.poll_interval))
         except (TypeError, ValueError):
@@ -75,28 +70,8 @@ class HitlNode(Node):
             return {"status": "replied", "replies": ["同意"],
                     "session_id": "dryrun", "dry_run": True}
 
-        image_failed = False
-        if images:
-            try:
-                probe = requests.post(f"{base}/api/send", json={
-                    "message": "（图片见下）", "images": list(images),
-                    "wait_reply": False, "upstream": "ilink",
-                }, timeout=15)
-                if not probe.json().get("success"):
-                    image_failed = True
-            except requests.RequestException:
-                image_failed = True
-        if image_failed:
-            message += "\n\n⚠️ 封面图发送失败（媒体窗口过期）：请先给 bot 发任意一条消息后说\"重发图\"。"
-
-        resp = requests.post(f"{base}/api/send", json={
-            "message": message, "wait_reply": self.wait_reply,
-            "timeout": timeout_secs, "upstream": "ilink",
-        }, timeout=30)
-        payload = resp.json()
-        if not payload.get("success"):
-            raise HitlError(f"hitl-server 发送失败: {payload.get('error') or payload}")
-        session_id = str(payload.get("session_id") or "")
+        session_id = send_message(base, message, [str(i) for i in images],
+                                  timeout_secs, wait_reply=self.wait_reply)
 
         if not self.wait_reply:
             # 只发不等（如周报推送），对标 hitl.js waitReply:false
