@@ -15,6 +15,11 @@
   agent span 下建子 observation——打开"agent 内部循环"的可见性。
 
 日志脱敏：任何路径都不打印 apiKey / ANTHROPIC_AUTH_TOKEN。
+
+沙箱执行（docs/sandbox-drivers-design.md v2.1）：节点声明 ``workspace``（infra 注册表
+``.plaita/sandboxes.json`` 里的名字，可表达式）即进沙箱——driver 产包裹 argv，
+agentproc runner 仍是唯一执行者；密钥只经 envfile 进容器，回传经 canary 脱敏。
+``repo`` 直跑路径与无 workspace 的存量 flow 行为逐字节不变。
 """
 from __future__ import annotations
 
@@ -34,6 +39,10 @@ class AgentRunError(RuntimeError):
     pass
 
 
+# 沙箱模式 runner 超时 = 沙箱内墙钟 + 余量（设计 §6.4：宿主兜底，击杀权在沙箱内）
+_RUNNER_TIMEOUT_MARGIN = 120
+
+
 # ── recursive 直调执行器（语义 = flowcast runRecursiveDirect）──────────
 
 def _make_recursive_handlers():
@@ -48,7 +57,14 @@ def _make_recursive_handlers():
             args += ["--model", env["RECURSIVE_MODEL"]]
         if env.get("RECURSIVE_MAX_STEPS"):
             args += ["--max-steps", str(env["RECURSIVE_MAX_STEPS"])]
-        args += ["run", message]
+        if session_id:
+            # 会话续跑（L2）：resume 是独立子命令（--resume 旗标不能与子命令
+            # 同用），message 走 -p/--message。子进程无 TTY = resume 的
+            # orphan tool_call 走默认 abort——会话由我方管线写入，不应有孤儿；
+            # headless/输出格式等全局旗标与 run 共用（前置已加）。
+            args += ["resume", session_id, "--message", message]
+        else:
+            args += ["run", message]
         return args
 
     return {"build_args": build_args}
@@ -202,6 +218,9 @@ class AgentRunNode(Node):
     - ``agent``: agents.json 里的名字（默认 ``glm-52``），支持表达式
     - ``prompt``: prompt 文本，支持 ``{% ... %}`` 模板表达式
     - ``repo``: 工作目录（recursive 的 ``--workspace``；默认进程 cwd）
+    - ``workspace``: 沙箱 workspace 名（``.plaita/sandboxes.json`` 注册表，支持表达式；
+      与 ``repo`` 互斥——workspace=沙箱执行，repo=宿主直跑）。未注册名 fail-closed；
+      求值为空硬失败（$INPUT 缺键静默 None 防线，设计 §4）
     - ``timeout_secs``: 超时秒数（默认 1800；flowcast 的 recursive 直路径无超时，
       这里是行为改进）
     - ``details``: 为 true 时收集 agent 内部事件（工具调用、文本轮）为输出
@@ -209,6 +228,10 @@ class AgentRunNode(Node):
       stream-json 后解析全文；claude-code 本走 stream-json，经协议行回调收集
     - ``dry_run``: 为 true（或流程 globalContext.dry_run=true）时不真正调用，
       返回 fake 文本
+    - ``session``: 会话 id（支持表达式）。非空时 recursive 走 ``resume <sid>
+      --message <prompt>`` 续会话而非 ``run``——断点续跑（L2）的接线面：前序
+      run 的输出 ``session_id`` / 会话存储里检索到的 id 喂回来即续上下文。
+      空/None = 全新 run（行为不变）。
 
     输出：``{"text", "cli", "model", "session_id", "usage", "dry_run"}``；
     ``details=true`` 且 recursive 时额外带 ``observations``。
@@ -220,16 +243,28 @@ class AgentRunNode(Node):
     agent: Optional[Any] = "glm-52"
     prompt: Optional[Any] = None
     repo: Optional[Any] = None
+    workspace: Optional[Any] = None
+    # 会话 id（支持表达式）：非空 → recursive 走 resume 续会话（L2 断点续跑）
+    session: Optional[Any] = None
     # Any 而非 int：DSL 传参下是表达式串（issue-pipeline v0.3 per-repo 预算），
     # execute 内求值后转 int（pydantic 构造期会拒收 str 进 int 字段）
     timeout_secs: Any = Field(default=1800)
     details: bool = False
     dry_run: bool = False
 
+    def validate(self) -> None:
+        """构建期互斥校验（由 FlowBuilder.validate 调用；JSON 直载路径是 warning
+        降级，运行期另有硬守卫）。"""
+        if self.workspace is not None and self.repo is not None:
+            raise AgentRunError(
+                "workspace 与 repo 互斥：workspace=沙箱执行，repo=宿主直跑路径，二选一")
+
     def execute(self, execution: Any) -> dict:
         agent_name = str(execution.evaluate(self.agent)) if self.agent is not None else "glm-52"
         prompt = execution.evaluate(self.prompt) if self.prompt is not None else ""
         repo = execution.evaluate(self.repo) if self.repo else None
+        # 会话续跑（L2）：空/None 退化为全新 run；非空 → executor 侧 resume 形态
+        session_id = str(execution.evaluate(self.session) or "") if self.session is not None else ""
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
 
         if dry:
@@ -237,6 +272,14 @@ class AgentRunNode(Node):
             return {"text": f"[dry-run] {agent_name} would run: {preview}",
                     "cli": agent_name, "model": None, "session_id": "",
                     "usage": None, "dry_run": True}
+
+        # 沙箱分支（设计 §4/§8）：声明 workspace 即进沙箱；dry 最先判已保证
+        # dry 下不解析注册表、不解析凭据、零 driver 调用。
+        if self.workspace is not None:
+            if repo:
+                raise AgentRunError(
+                    "workspace 与 repo 互斥：workspace=沙箱执行，repo=宿主直跑路径，二选一")
+            return self._execute_sandboxed(execution, agent_name, str(prompt))
 
         profile = resolve_agent(agent_name, repo=repo)
         executor = profile["executor"]
@@ -280,26 +323,49 @@ class AgentRunNode(Node):
                  or agent_name)
         result = agentproc_run(
             {"executor": ap_executor},
-            RunOptions(message=str(prompt), extra_env=extra_env,
+            RunOptions(message=str(prompt), session_id=session_id,
+                       extra_env=extra_env,
                        timeout_secs=int(execution.evaluate(self.timeout_secs) or 1800),
                        on_protocol_line=_on_protocol_line),
         )
         if result.error or result.exit_code != 0:
             raise AgentRunError(result.error or f"{agent_name} 退出码 {result.exit_code}")
 
-        text = result.reply
+        text, usage, observations = self._interpret_result(
+            executor=executor, result=result, protocol_lines=protocol_lines,
+            want_details=want_details)
+
+        out = {"text": text, "cli": executor, "model": model,
+               "session_id": result.session_id,
+               "usage": usage, "dry_run": False}
+        if observations is not None:
+            out["observations"] = observations
+        return out
+
+    def _interpret_result(self, *, executor: str, result: Any,
+                          protocol_lines: list, redactor: Any = None,
+                          want_details: bool = False):
+        """agentproc RunResult → (text, usage, observations)。
+
+        直跑与沙箱两条路径共用；``redactor`` 非 None 时（沙箱路径）reply 与
+        错误文案先过 canary 脱敏再解析（设计 §7.1）。协议行在追加时已脱敏。
+        """
+        red = (lambda t: t) if redactor is None else redactor.redact
+        reply = red(result.reply)
+        text = reply
         usage = result.usage
         observations: Optional[list[dict]] = None
         if executor == "recursive":
-            parsed = extract_recursive_result(result.reply)
+            parsed = extract_recursive_result(reply)
             if parsed.get("is_error"):
-                raise AgentRunError(f"recursive is_error: {str(parsed.get('result'))[:300]}")
+                raise AgentRunError(
+                    f"recursive is_error: {red(str(parsed.get('result'))[:300])}")
             text = str(parsed.get("result") or "")
             # plain 直调路径 agentproc 解析不到 NDJSON 事件，usage 兜底取自
             # 结果对象本体（recursive --output-format json 自带 usage 字段）
             usage = result.usage or parsed.get("usage")
             if want_details:
-                observations = parse_stream_details(result.reply.splitlines())
+                observations = parse_stream_details(reply.splitlines())
         elif protocol_lines:
             # claude-code 等流式执行器：终态 result 事件的 usage 兜底
             for raw in protocol_lines:
@@ -315,12 +381,138 @@ class AgentRunNode(Node):
                     break
             if want_details:
                 observations = parse_stream_details(protocol_lines)
+        return text, usage, observations
+
+    @staticmethod
+    def _resolve_spec_env(value: Any) -> str:
+        """注册表 env 值：字面量（加载时已 ${VAR} 插值）或凭据引用
+        ``{"credential": 名, "field": 字段(默认 token)}``（经 plaita.credentials）。"""
+        if isinstance(value, dict) and value.get("credential"):
+            from plaita.credentials import CredentialError, get_credential
+            try:
+                bundle = get_credential(str(value["credential"]))
+            except CredentialError as exc:
+                raise AgentRunError(f"沙箱凭据解析失败：{exc}") from exc
+            field_name = str(value.get("field") or "token")
+            resolved = bundle.get(field_name)
+            if resolved is None:
+                raise AgentRunError(
+                    f"凭据 '{value['credential']}' 缺少字段 {field_name}")
+            return str(resolved)
+        return str(value)
+
+    def _execute_sandboxed(self, execution: Any, agent_name: str, prompt: str) -> dict:
+        """workspace 沙箱执行（设计 §3/§4/§6/§7）。
+
+        顺序即纪律：注册表 fail-closed → lease 快速失败 → 凭据/env 白名单 →
+        envfile(0600) → ensure（含抢占清残与幂等 provision）→ runner 执行 →
+        失败 enforce → 脱敏回传；finally 焚 envfile、释放租约。
+        """
+        from . import sandbox as sb
+        from .sandbox_docker import DockerDriver  # noqa: F401  # import 即注册 docker driver
+
+        ws_key = execution.evaluate(self.workspace)
+        ws_key = "" if ws_key is None else str(ws_key).strip()
+        if not ws_key:
+            raise AgentRunError(
+                "workspace 求值为空——拒绝执行（$INPUT 缺键会静默 None，"
+                "空名会让所有迭代共享同一沙箱，设计 §4 None 静默守卫）")
+        execution_id = str(getattr(execution, "execution_id", "") or "")
+        if not execution_id:
+            raise AgentRunError("execution 缺少 execution_id，无法派生 workspace handle")
+
+        spec = sb.load_sandboxes().get(ws_key)
+        if spec is None:
+            raise AgentRunError(
+                f"workspace '{ws_key}' 未注册（fail-closed，运行期不自动创建）："
+                f"请在 .plaita/sandboxes.json 定义后按名引用")
+        # provision.git.branch 允许 flow 表达式（首个引用节点求值；须确定性，设计 §4）
+        git = (spec.provision or {}).get("git")
+        if isinstance(git, dict) and git.get("branch") is not None:
+            git["branch"] = str(execution.evaluate(git.get("branch")) or "").strip() or None
+
+        driver = sb.get_driver(spec.driver)
+        if driver is None:
+            raise AgentRunError(
+                f"沙箱 driver '{spec.driver}' 未注册（可用：{sorted(sb.SANDBOX_DRIVERS)}）")
+
+        profile = resolve_agent(agent_name, repo=None)
+        executor = profile["executor"]
+        register_recursive_direct()
+        from agentproc import EXECUTORS as AP_EXECUTORS
+
+        ap_executor = EXECUTOR_ALIASES.get(executor, executor)
+        if ap_executor not in AP_EXECUTORS:
+            raise AgentRunError(
+                f"执行器 '{executor}' 未接入（agentproc 可用：{sorted(AP_EXECUTORS)}）；"
+                f"如需其他 CLI 请在 agentproc executor 层扩展或加 EXECUTOR_ALIASES 映射"
+            )
+        sandbox_executor = sb.register_sandbox_executor(ap_executor)
+
+        from agentproc.runner import RunOptions
+        from agentproc.runner import run as agentproc_run
+
+        wall_secs = int(execution.evaluate(self.timeout_secs) or 1800)
+        runner_timeout = wall_secs + _RUNNER_TIMEOUT_MARGIN
+
+        # env 白名单 = provider 翻译/agents.json env + 注册表 env；密钥只进 envfile
+        env_whitelist = dict(profile["env"])
+        for key, value in (spec.env or {}).items():
+            env_whitelist[str(key)] = self._resolve_spec_env(value)
+        redactor = sb.Redactor(env_whitelist)
+
+        lease = sb.WorkspaceLease(
+            sb.default_lease_store(), sb.handle_id(execution_id, ws_key),
+            ttl=runner_timeout + 60.0)
+        lease.acquire()  # 冲突 → SandboxLeaseError（快速失败，error 终态 + 指引重投）
+        envfile = sb.write_envfile(env_whitelist)
+        protocol_lines: list[str] = []
+
+        def _on_protocol_line(line: str) -> None:
+            protocol_lines.append(redactor.redact(line))
+
+        try:
+            lease.start_heartbeat()
+            handle = driver.ensure(spec, execution_id, ws_key)
+
+            extra_env = sb.sandbox_extra_env(handle, spec, wall_secs, envfile,
+                                             execution_id)
+            extra_env["RECURSIVE_WORKSPACE"] = handle.path  # 容器内路径（非宿主路径）
+            # argv 旋钮（非密钥）：build_args 组装 argv 需要它们；密钥不走 extra_env
+            for knob in ("RECURSIVE_MODEL", "RECURSIVE_MAX_STEPS"):
+                if profile["env"].get(knob):
+                    extra_env[knob] = profile["env"][knob]
+            want_details = bool(execution.evaluate(self.details)) if self.details is not None else False
+            if want_details and executor == "recursive":
+                extra_env["RECURSIVE_OUTPUT_FORMAT"] = "stream-json"
+            model = (profile.get("model")
+                     or extra_env.get("RECURSIVE_MODEL")
+                     or agent_name)
+
+            result = agentproc_run(
+                {"executor": sandbox_executor},
+                RunOptions(message=prompt, extra_env=extra_env,
+                           timeout_secs=runner_timeout,
+                           on_protocol_line=_on_protocol_line),
+            )
+            if result.error or result.exit_code != 0:
+                driver.enforce(handle)  # 最终击杀权在 driver（设计 §6.4）
+                raise AgentRunError(
+                    redactor.redact(result.error or f"{agent_name} 退出码 {result.exit_code}"))
+
+            text, usage, observations = self._interpret_result(
+                executor=executor, result=result, protocol_lines=protocol_lines,
+                redactor=redactor, want_details=want_details)
+        finally:
+            sb.burn_envfile(envfile)
+            lease.release()
 
         out = {"text": text, "cli": executor, "model": model,
                "session_id": result.session_id,
                "usage": usage, "dry_run": False}
         if observations is not None:
             out["observations"] = observations
+        out["workspace"] = handle.snapshot(env_names=env_whitelist.keys())
         return out
 
 
