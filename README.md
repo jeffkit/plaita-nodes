@@ -84,6 +84,21 @@ JSON 用法示例（agentrun + 模板表达式）：
 }
 ```
 
+## 业务仓接入要点
+
+1. **安装即注册 ≠ 可用**：节点经 `[project.entry-points."plaita.nodes"]` 懒发现，须在构建 Flow（尤其 `flow_from_source`）**之前**显式触发——业务入口统一：
+
+   ```python
+   import plaita_nodes                    # 顺带注册 agentproc recursive-direct executor
+   from plaita.node import get_default_registry
+   get_default_registry()                 # ★ 触发 entry_points 懒发现，漏了节点全"未注册"
+   ```
+
+2. **console / flow_worker 侧**：console 拉起的 worker 不认识业务 venv 里的节点，须注入 `PLAITA_NODE_PATH` / `PLAITA_NODE_MODULES`（节点包）与 `PLAITA_PYTHON`（业务解释器）——否则「发布成功、调度必败」。机制见大仓 ADR-2026-08-27。
+3. **轻逻辑**：纯变换优先 `F.*` 表达式或 plaita 内置 CODE 节点（`register_code_node(default_backend="subprocess")`，code 须自带 `def run(input) -> dict`）；不够用再写业务粘接节点（放业务仓，不放本仓）。
+4. **节点 I/O 参考**：当前以各节点源码 docstring 为准（`src/plaita_nodes/<node>.py`）；`@flow` 源码里占位符 = `node_type` 大写（如 `AGENTRUN(...)`）。
+5. **写 flow 的完整规范**（作者硬约束 / 项目结构 / 发布链路）：`../plaita/plaita-ai/plaita_ai/skills/flow-coder/references/authoring-spec.md`。
+
 ## agents.json / providers.json 兼容性
 
 配置搜索顺序与 flowcast 一致：`~/.flowx → ~/.flowcast → <repo>/.flowcast`（深合并）。
