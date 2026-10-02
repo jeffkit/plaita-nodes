@@ -23,7 +23,7 @@ def _run_write(path, content="x"):
         "flow_id": "w",
         "nodes": [
             {"type": "start", "id": "s", "next": "w"},
-            {"type": "writefile", "id": "w", "path": path, "content": content},
+            {"type": "writefile", "id": "w", "path": path, "content": content, "next": "e"},
             {"type": "end", "id": "e", "output": "$NODE.w.path", "resultType": "success"},
         ],
     }))
