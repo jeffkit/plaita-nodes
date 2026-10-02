@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import threading
 from typing import Any, ClassVar, Optional
 
 from pydantic import Field
@@ -41,6 +43,25 @@ class AgentRunError(RuntimeError):
 
 # 沙箱模式 runner 超时 = 沙箱内墙钟 + 余量（设计 §6.4：宿主兜底，击杀权在沙箱内）
 _RUNNER_TIMEOUT_MARGIN = 120
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """超时兜底：SIGKILL 整个进程组并回收（同 capture/gate 的击杀形态）。
+
+    Popen 侧 start_new_session 使子进程自成进程组，killpg 连 agent 拉起的
+    子树一起清；Windows 无 killpg（AttributeError），退回单进程 kill。
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 # ── recursive 直调执行器（语义 = flowcast runRecursiveDirect）──────────
@@ -541,17 +562,52 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     argv = handlers["build_args"](task, "", env_extra)
     # 子进程必须拿到 provider 凭证 env（否则无凭证运行得到空回复）
     proc_env = {**os.environ, **env_extra}
+    # 独立进程组：超时 killpg 连 agent 拉起的子树一起清（同 capture/gate 形态）
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, cwd=workspace, env=proc_env)
+                            text=True, cwd=workspace, env=proc_env,
+                            start_new_session=True)
     lines: list[str] = []
     deadline = _time.monotonic() + timeout_secs
+    timed_out = {"flag": False}
+
+    def _drain_stderr() -> None:
+        # stderr 排水线程：stderr=PIPE 却无人消费时，子进程写满管道缓冲
+        # （Linux 上 ~64KB）即阻塞，stdout 永不 EOF → 调用方永久挂死。
+        try:
+            for _ in proc.stderr:  # type: ignore[union-attr]
+                pass
+        except (ValueError, OSError):
+            pass
+
+    def _enforce_deadline() -> None:
+        # 看门狗线程：deadline 到而进程仍在跑 → 击杀整个进程组。逐行读
+        # stdout 只在行到达时才有机会检查 deadline，进程无输出挂死时
+        # 只有这条路能保证调用方不永久阻塞。
+        remaining = deadline - _time.monotonic()
+        if remaining > 0:
+            _time.sleep(remaining)
+        if proc.poll() is None:
+            timed_out["flag"] = True
+            _kill_process_group(proc)
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    threading.Thread(target=_enforce_deadline, daemon=True).start()
+
     for line in proc.stdout:  # type: ignore[union-attr]
         yield {"type": "line", "text": line.rstrip("\n")}
         lines.append(line)
-    proc.wait()
-    timed_out = _time.monotonic() > deadline
+
+    # stdout EOF 后等退出，仍受 deadline 约束（历史实现 proc.wait() 无限等、
+    # timed_out 在 wait 之后才判——进程挂死时调用方永久阻塞且超时形同虚设）。
+    # 看门狗击杀后 stdout 同样 EOF，wait 会立即返回被杀退出码。
+    try:
+        proc.wait(timeout=max(deadline - _time.monotonic(), 0.0))
+    except subprocess.TimeoutExpired:
+        timed_out["flag"] = True
+        _kill_process_group(proc)
+
     stdout = "".join(lines)
-    if timed_out:
+    if timed_out["flag"]:
         yield {"type": "done", "ok": False, "result": "", "error": f"agent 超时（>{timeout_secs}s）"}
         return
     parsed = extract_recursive_result(stdout)
