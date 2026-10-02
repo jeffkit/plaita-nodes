@@ -24,6 +24,7 @@ agentproc runner 仍是唯一执行者；密钥只经 envfile 进容器，回传
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -39,6 +40,30 @@ from .config import EXECUTOR_ALIASES, resolve_agent
 
 class AgentRunError(RuntimeError):
     pass
+
+
+_log = logging.getLogger(__name__)
+
+
+def preflight_workspace(workspace: str, *, grace_secs: float = 10.0) -> dict:
+    """kill-before-start：开工前清理同 workspace 的孤儿 agent 进程组（G3）。
+
+    孤儿 = worker 被 SIGKILL/OOM 硬死后遗存、仍在写 worktree 的 agent CLI
+    进程组，经 agentproc 遗言锁（run_lock）定位。任一新 agent 开工前都应走
+    这里——时序上保证「旧的死了新的才开工」，根除并发写。busy（疑似占用但
+    身份无法核实）→ AgentRunError：宁可不开工也不并发写。
+    供 AgentRunNode 直跑路径与 keeper reaper（WIP 快照前）复用。
+    """
+    from agentproc.run_lock import RunLockBusy, cleanup_stale_run
+
+    try:
+        info = cleanup_stale_run(os.path.abspath(workspace), grace_secs=grace_secs)
+    except RunLockBusy as exc:
+        raise AgentRunError(f"workspace 孤儿清场未完成，拒绝开工：{exc}") from exc
+    if info.get("action") == "killed":
+        _log.warning("preflight 清理孤儿 agent：workspace=%s pid=%s command=%s",
+                     workspace, info.get("pid"), info.get("command"))
+    return info
 
 
 # 沙箱模式 runner 超时 = 沙箱内墙钟 + 余量（设计 §6.4：宿主兜底，击杀权在沙箱内）
@@ -305,6 +330,14 @@ class AgentRunNode(Node):
         profile = resolve_agent(agent_name, repo=repo)
         executor = profile["executor"]
 
+        # kill-before-start（G3）：直跑路径的 repo 即 agent 的工作 worktree，
+        # 开工前清掉同 workspace 的孤儿；本次 spawn 也落遗言锁供下轮清理。
+        # 沙箱路径不走此门：VM 边界 + WorkspaceLease 已各管一摊。
+        run_lock_key: Optional[str] = None
+        if repo:
+            run_lock_key = os.path.abspath(str(repo))
+            preflight_workspace(run_lock_key)
+
         # agentproc 延迟到执行时才 import（可选依赖，见 register_recursive_direct）
         register_recursive_direct()
         from agentproc import EXECUTORS as AP_EXECUTORS
@@ -346,6 +379,7 @@ class AgentRunNode(Node):
             {"executor": ap_executor},
             RunOptions(message=str(prompt), session_id=session_id,
                        extra_env=extra_env,
+                       run_lock_key=run_lock_key,
                        timeout_secs=int(execution.evaluate(self.timeout_secs) or 1800),
                        on_protocol_line=_on_protocol_line),
         )
@@ -550,6 +584,9 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     """
     import time as _time
 
+    workspace_abs = os.path.abspath(workspace)
+    preflight_workspace(workspace_abs)
+
     register_recursive_direct()
     agent = resolve_agent(profile)
     env_extra = dict(agent["env"])
@@ -566,6 +603,17 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, cwd=workspace, env=proc_env,
                             start_new_session=True)
+    from agentproc import run_lock as _run_lock
+    _run_lock.write_run_lock(workspace_abs, proc.pid, argv)
+    try:
+        yield from _stream_turn_body(proc, timeout_secs)
+    finally:
+        _run_lock.clear_run_lock(workspace_abs)
+
+
+def _stream_turn_body(proc: subprocess.Popen, timeout_secs: int):
+    import time as _time
+
     lines: list[str] = []
     deadline = _time.monotonic() + timeout_secs
     timed_out = {"flag": False}
