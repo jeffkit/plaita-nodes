@@ -45,7 +45,18 @@ class AgentRunError(RuntimeError):
 _log = logging.getLogger(__name__)
 
 
-def preflight_workspace(workspace: str, *, grace_secs: float = 10.0) -> dict:
+def _run_lock_key(workspace: str, run_key: Optional[str] = None) -> str:
+    """遗言锁键 = workspace 绝对路径 (+ run 作用域)。
+
+    同 workspace 的并发 run 各持一把锁：后开工者的 preflight 看不到兄弟 run
+    的锁，不会把对方仍存活的 agent 当孤儿 killpg。
+    """
+    ws = os.path.abspath(workspace)
+    return f"{ws}#{run_key}" if run_key else ws
+
+
+def preflight_workspace(workspace: str, *, run_key: Optional[str] = None,
+                        grace_secs: float = 10.0) -> dict:
     """kill-before-start：开工前清理同 workspace 的孤儿 agent 进程组（G3）。
 
     孤儿 = worker 被 SIGKILL/OOM 硬死后遗存、仍在写 worktree 的 agent CLI
@@ -53,16 +64,20 @@ def preflight_workspace(workspace: str, *, grace_secs: float = 10.0) -> dict:
     这里——时序上保证「旧的死了新的才开工」，根除并发写。busy（疑似占用但
     身份无法核实）→ AgentRunError：宁可不开工也不并发写。
     供 AgentRunNode 直跑路径与 keeper reaper（WIP 快照前）复用。
+
+    ``run_key`` 非空时锁键带 run 作用域：只清本 run 的锁，同 workspace 其它
+    run 的 live agent 与锁一律不碰。
     """
     from agentproc.run_lock import RunLockBusy, cleanup_stale_run
 
     try:
-        info = cleanup_stale_run(os.path.abspath(workspace), grace_secs=grace_secs)
+        info = cleanup_stale_run(_run_lock_key(workspace, run_key), grace_secs=grace_secs)
     except RunLockBusy as exc:
         raise AgentRunError(f"workspace 孤儿清场未完成，拒绝开工：{exc}") from exc
-    if info.get("action") == "killed":
-        _log.warning("preflight 清理孤儿 agent：workspace=%s pid=%s command=%s",
-                     workspace, info.get("pid"), info.get("command"))
+    if info.get("action") in ("killed", "stale"):
+        _log.warning("preflight 清理孤儿 agent：workspace=%s run_key=%s action=%s pid=%s command=%s",
+                     os.path.abspath(workspace), run_key or "", info.get("action"),
+                     info.get("pid"), info.get("command") or "")
     return info
 
 
@@ -335,8 +350,11 @@ class AgentRunNode(Node):
         # 沙箱路径不走此门：VM 边界 + WorkspaceLease 已各管一摊。
         run_lock_key: Optional[str] = None
         if repo:
-            run_lock_key = os.path.abspath(str(repo))
-            preflight_workspace(run_lock_key)
+            # run 作用域取 execution_id（每 dispatch 唯一）⇒ 原子锁文件按 run 分开；
+            # 无 execution_id 的执行桩回退裸 workspace 键（今日行为）。同 _execute_sandboxed。
+            run_scope = str(getattr(execution, "execution_id", "") or "")
+            run_lock_key = _run_lock_key(str(repo), run_scope or None)
+            preflight_workspace(str(repo), run_key=run_scope or None)
 
         # agentproc 延迟到执行时才 import（可选依赖，见 register_recursive_direct）
         register_recursive_direct()
@@ -574,7 +592,8 @@ class AgentRunNode(Node):
 def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
                           model: Optional[str] = None,
                           max_steps: Optional[int] = None,
-                          timeout_secs: int = 1800):
+                          timeout_secs: int = 1800,
+                          run_key: Optional[str] = None):
     """以流式方式跑一轮 recursive Agent（生成器：yield 事件 dict）。
 
     事件序列：
@@ -585,7 +604,11 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     import time as _time
 
     workspace_abs = os.path.abspath(workspace)
-    preflight_workspace(workspace_abs)
+    # 无 execution 上下文的宿主（console）：默认以宿主进程为 run 身份，避免两个
+    # console 进程同 workspace 互相当孤儿杀；需要跨重启清场时由宿主显式传稳定 run_key。
+    scope = run_key or f"host-{os.getpid()}"
+    lock_key = _run_lock_key(workspace_abs, scope)
+    preflight_workspace(workspace_abs, run_key=scope)
 
     register_recursive_direct()
     agent = resolve_agent(profile)
@@ -604,11 +627,11 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
                             text=True, cwd=workspace, env=proc_env,
                             start_new_session=True)
     from agentproc import run_lock as _run_lock
-    _run_lock.write_run_lock(workspace_abs, proc.pid, argv)
+    _run_lock.write_run_lock(lock_key, proc.pid, argv)
     try:
         yield from _stream_turn_body(proc, timeout_secs)
     finally:
-        _run_lock.clear_run_lock(workspace_abs)
+        _run_lock.clear_run_lock(lock_key)
 
 
 def _stream_turn_body(proc: subprocess.Popen, timeout_secs: int):

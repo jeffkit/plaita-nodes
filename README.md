@@ -11,7 +11,7 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 
 | type | 节点 | 说明 |
 |------|------|------|
-| `agentrun` | Agent 运行 | **Agent 原子**：多步工具循环（模型可调工具自主多轮）。经 [agentproc](../agentproc) 调用 Agent CLI（recursive / claude）；配置复用 flowcast 的 `agents.json` / `providers.json` |
+| `agentrun` | Agent 运行 | **Agent 原子**：多步工具循环（模型可调工具自主多轮）。经 [agentproc](../agentproc) 调用 Agent CLI（recursive / claude）；配置复用 flowcast 的 `agents.json` / `providers.json`。开工前过 kill-before-start 遗言锁门（`preflight_workspace`），锁键按 run 作用域（`execution_id`）分开——同仓并发 run 各自清场，不把兄弟 run 的存活 agent 当孤儿杀（[#2](https://github.com/jeffkit/plaita-nodes/issues/2)） |
 | `llm` | LLM 补全 | **LLM 原子**：单次 chat/completions 生成文本（OpenAI 兼容端点）。与 agentrun 的边界见下 |
 | `decision` | 结构化决策 | **决策原子**：封闭决策空间 → 类型化选择 + 置信度。单条（`input`）或批量（`items`，provider 单次调用逐项判定，适合快照剪枝/批量预筛）。provider 可插拔：`llm` / `jev`（官方 Jev 与自托管 [OpenJev](https://github.com/razorback16/openjev) 同说的 `/v1/systemone` 线协议）/ `jevlike`（本地打分器，`model`=checkpoint 路径，懒加载 torch）/ 自定义注册；低于阈值可标记/走默认项/抛错升级 HITL |
 | `capture` | 命令执行 | 跑本地命令捕获输出；失败不抛错（`exit_code` 返回，流程自行分支） |

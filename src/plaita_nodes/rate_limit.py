@@ -108,6 +108,9 @@ class RateLimitNode(Node):
                     f.seek(0)
                     f.truncate()
                     f.write(json.dumps(stamps[-100:]))
+                    # 释放锁前必须 flush：下一个持锁者经 path 重新读盘，
+                    # 缓冲未落盘会读到旧内容而重复放行
+                    f.flush()
             finally:
                 if fcntl is not None:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
