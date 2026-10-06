@@ -42,6 +42,16 @@ class AgentRunError(RuntimeError):
     pass
 
 
+def _ap_exit_cancelled() -> int:
+    """agentproc 的 EXIT_CANCELLED（125）。agentproc 缺席时回退字面量——本常
+    量在运行器契约层固定，直跑与沙箱两条路径共用。"""
+    try:
+        from agentproc.runner import EXIT_CANCELLED
+        return int(EXIT_CANCELLED)
+    except Exception:  # noqa: BLE001 — 可选依赖缺席
+        return 125
+
+
 _log = logging.getLogger(__name__)
 
 
@@ -399,8 +409,17 @@ class AgentRunNode(Node):
                        extra_env=extra_env,
                        run_lock_key=run_lock_key,
                        timeout_secs=int(execution.evaluate(self.timeout_secs) or 1800),
+                       # 协作式取消（2026-10 波次③步内中断）：worker 取消监听命中
+                       # 标志键即置位 execution.cancel_event，agentproc 在等待子
+                       # 进程期间观察到置位则分级击杀 agent 进程组（SIGTERM →
+                       # kill_grace → SIGKILL），不再白等满 timeout_secs（默认
+                       # 1800s）。无 cancel_event 的执行（单测/local 旧路径）→
+                       # None，退化为纯超时驱动（现状）。
+                       cancel_event=getattr(execution, "cancel_event", None),
                        on_protocol_line=_on_protocol_line),
         )
+        if getattr(result, "exit_code", 0) == _ap_exit_cancelled():
+            raise AgentRunError("agent 执行被取消（cancel_event 命中）")
         if result.error or result.exit_code != 0:
             raise AgentRunError(result.error or f"{agent_name} 退出码 {result.exit_code}")
 
@@ -566,8 +585,14 @@ class AgentRunNode(Node):
                 {"executor": sandbox_executor},
                 RunOptions(message=prompt, extra_env=extra_env,
                            timeout_secs=runner_timeout,
+                           # 协作式取消（波次③）：命中即击杀宿主侧包装进程组，
+                           # 沙箱内的 driver.enforce 兜底最终击杀权（设计 §6.4）。
+                           cancel_event=getattr(execution, "cancel_event", None),
                            on_protocol_line=_on_protocol_line),
             )
+            if getattr(result, "exit_code", 0) == _ap_exit_cancelled():
+                driver.enforce(handle)
+                raise AgentRunError("agent 沙箱执行被取消（cancel_event 命中）")
             if result.error or result.exit_code != 0:
                 driver.enforce(handle)  # 最终击杀权在 driver（设计 §6.4）
                 raise AgentRunError(
