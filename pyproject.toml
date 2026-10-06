@@ -46,6 +46,11 @@ api_request = "plaita_nodes.api:ApiRequestNode"
 sql_query = "plaita_nodes.database:SqlQueryNode"
 email_send = "plaita_nodes.email:EmailSendNode"
 
+# 沙箱 driver 外部插拔组（设计 docs/sandbox-drivers-design.md §3.3）：
+# 本仓 docker driver 由 plaita_nodes.sandbox_docker import 时进程内注册，
+# 本组供外部包注册（加载失败降级告警，不炸注册表）。
+[project.entry-points."plaita_nodes.sandbox_drivers"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/plaita_nodes"]
 
