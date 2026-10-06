@@ -65,15 +65,23 @@ pytestmark = pytest.mark.skipif(not ALL_DRIVERS,
                                 reason="无可用沙箱 CLI（docker/krunvm）")
 
 
+def _cleanup_quiet(argv: list) -> None:
+    """清理命令缺失（未安装该 driver CLI）时静默跳过，不炸 teardown。"""
+    try:
+        subprocess.run(argv, capture_output=True)
+    except OSError:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_resources():
     yield
     vm = resource_name(EXEC_ID, WS_KEY, "vm").lower()
-    subprocess.run(["docker", "rm", "-f", "--force",
-                    resource_name(EXEC_ID, WS_KEY, "ctr")], capture_output=True)
-    subprocess.run(["docker", "volume", "rm", "--force",
-                    resource_name(EXEC_ID, WS_KEY, "vol")], capture_output=True)
-    subprocess.run(["krunvm", "delete", vm], capture_output=True)
+    _cleanup_quiet(["docker", "rm", "-f", "--force",
+                    resource_name(EXEC_ID, WS_KEY, "ctr")])
+    _cleanup_quiet(["docker", "volume", "rm", "--force",
+                    resource_name(EXEC_ID, WS_KEY, "vol")])
+    _cleanup_quiet(["krunvm", "delete", vm])
 
 
 @pytest.fixture(params=ALL_DRIVERS, ids=ALL_DRIVERS)
