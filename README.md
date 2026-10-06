@@ -15,7 +15,7 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 | `llm` | LLM 补全 | **LLM 原子**：单次 chat/completions 生成文本（OpenAI 兼容端点）。与 agentrun 的边界见下 |
 | `decision` | 结构化决策 | **决策原子**：封闭决策空间 → 类型化选择 + 置信度。单条（`input`）或批量（`items`，provider 单次调用逐项判定，适合快照剪枝/批量预筛）。provider 可插拔：`llm` / `jev`（官方 Jev 与自托管 [OpenJev](https://github.com/razorback16/openjev) 同说的 `/v1/systemone` 线协议）/ `jevlike`（本地打分器，`model`=checkpoint 路径，懒加载 torch）/ 自定义注册；低于阈值可标记/走默认项/抛错升级 HITL |
 | `capture` | 命令执行 | 跑本地命令捕获输出；失败不抛错（`exit_code` 返回，流程自行分支） |
-| `gate` | 质量门 | 验证命令语义化为 `passed` 布尔（对标 flowcast runGate）；`max_retries` 失败自动**重跑命令**；超时 kill 进程组返回 `exit_code=124` |
+| `gate` | 质量门 | 验证命令语义化为 `passed` 布尔（对标 flowcast runGate）；`max_retries` 失败自动**重跑命令**；超时 kill 进程组返回 `exit_code=124`；输出超阈值（stdout>4000 / stderr>2000）时**头尾保留**并标注 `…[省略 N 字符]…`，尾部失败摘要（`failures:` / `test result:`）不再丢失（[#3](https://github.com/jeffkit/plaita-nodes/issues/3)） |
 | `rate_limit` | 频率限制 | 文件计数器按 key 日/周限次（`check`/`record`/`clear`）；`acquire` 原子判定+占坑（flock 互斥），check/record 两步间不会 crash/并发双发 |
 | `report` | 结果通道 | run 级 jsonl 追加/读取（`<repo>/.flowcast/plaita-reports/<token>.jsonl`）：map 子流程与主流程聚合的旁路——绕开内核 map end 递归限制与 if 作用域隔离（workaround，内核侧追踪 [plaita#16](https://github.com/jeffkit/plaita/issues/16)） |
 | `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 进程内轮询回复（**阻塞版**，Normal 模式） |
@@ -142,6 +142,7 @@ pytest
 
 ## 变更摘要
 
+- **未发布**（2026-10-06）：`gate` 大输出截断改**头尾保留** + `…[省略 N 字符]…` 标注——stdout>4000 / stderr>2000 时尾部失败摘要（`failures:` / `test result: FAILED`）不再被头部切片丢掉（[plaita-nodes#3](https://github.com/jeffkit/plaita-nodes/issues/3)）；阈值与既有输出字段不变，小输出原文照传、无新增文件。
 - **0.8.0**（2026-09-30）：通知出口收敛——新增 `notify_backends.NOTIFY_BACKENDS` 注册表（先例 `DECISION_PROVIDERS`），协议适配（payload 组装/钉钉加签/SMTP）收进 backend；`webhook`×4 / `email_send` 改薄壳委托（DSL 兼容、输出形状不变，既有连接器测试全绿）；`notify.channel` 可指向任何已注册 backend（新渠道只加 backend 不加节点，[plaita-nodes#1](https://github.com/jeffkit/plaita-nodes/issues/1)）；`notify` 补 dry-run。
 - **0.7.0**（2026-09-30）：修复、契约收口与结构收敛。
   - *修复*：`gate.max_retries` 假重试（Popen 在循环外导致从未真正重跑，现每轮重新执行命令）；移除 `sql_query` 遗留调试输出（params 泄漏风险）；`hitl_poller` 缺 `os` import（默认 `--hitl-url` 路径 NameError）。
