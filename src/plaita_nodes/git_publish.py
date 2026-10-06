@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import warnings
 from typing import Any, ClassVar, Optional
 
 from plaita import Node
@@ -83,6 +84,27 @@ class GitPublishNode(Node):
         if dry:
             return {"pushed": True, "merged": None, "push_note": "", "note": "dry-run：跳过 git 操作",
                     "dry_run": True}
+
+        # 沙箱绊线（设计 §11）：flow 里存在沙箱 workspace 快照时，宿主侧 git_publish
+        # 很可能指着宿主遗留 checkout——「各自成功、沙箱里的活儿永不出仓」的静默
+        # 分叉防线（沙箱产物应在沙箱内 push，见 docs/sandbox-drivers-design.md §11）
+        try:
+            ctx = getattr(execution, "context", None)
+            if ctx is not None and hasattr(ctx, "to_dict"):
+                ctx = ctx.to_dict()
+            if isinstance(ctx, dict):
+                ws_snaps = [s for s in ctx.get("$NODE", {}).values()
+                            if isinstance(s, dict) and isinstance(s.get("workspace"), dict)]
+                if ws_snaps:
+                    warnings.warn(
+                        "本 flow 存在沙箱 workspace 快照（"
+                        + ", ".join(str(s["workspace"].get("id")) for s in ws_snaps)
+                        + "），而 git_publish 在宿主侧执行——确认 worktree_dir 不是"
+                        "沙箱工作副本的宿主遗留 checkout（沙箱产物应在沙箱内 push）",
+                        RuntimeWarning, stacklevel=2)
+        except Exception:  # 绊线只告警不挡路，探测失败静默
+            pass
+
         if merge_mode == "main" and self.main_clone is None:
             raise ValueError("git_publish merge_mode=main 需要 main_clone 字段")
 

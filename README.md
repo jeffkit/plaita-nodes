@@ -40,6 +40,22 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 
 节点经 pyproject 的 `[project.entry-points."plaita.nodes"]` 自动注册；`plaita_nodes.register_all()` 可手动注册。
 
+## 沙箱执行（agentrun + workspace）
+
+coding 场景的 agentrun 可声明 `workspace`（infra 注册表 `.plaita/sandboxes.json`
+里的名字），把执行面关进沙箱容器：agent 的工具调用（bash/测试）全在容器里，
+控制面（checkpoint/EventBus）留宿主；数据进出只经 git（clone 进 / push 出），
+断点续跑经确定性命名免费重建。密钥只经 envfile（0600 即焚）进容器，回传经
+canary 脱敏。不声明 `workspace` 的存量 flow 行为逐字节不变（`repo` 宿主直跑）。
+
+- 场景文档：[plaita 文档站 · 沙箱化 Coding Agent](https://jeffkit.github.io/plaita/scenarios/sandbox-coding/)
+- 设计全貌（四路评审定稿）：[`docs/sandbox-drivers-design.md`](docs/sandbox-drivers-design.md)
+- 现状：`docker` driver 现役（真容器 E2E 三条 + conformance 实跑套件）；`krunvm`
+  本地 microVM 实验档已试点（libkrun/Hypervisor.framework，真 microVM E2E 三条已过；
+  数据面宿主侧）；`ssh` 远端 VM 实验档已落地（E2E 以 Docker sshd 为靶机 4 条已过）；
+  `e2b`（云沙箱 API）按设计文档 P3 排期；生命周期回调 + status-aware reaper +
+  git_publish 沙箱绊线已落地（`lifecycle.py` / `python -m plaita_nodes.sandbox_reaper`）
+
 ## 原子节点设计原则
 
 抽象一条硬标准——**原子性**（一个节点只做一件不可再分的事）、**通用性**
