@@ -26,6 +26,9 @@ from plaita import Node
 
 _log = logging.getLogger(__name__)
 
+# 宿主工件注入的沙箱落点前缀（模块级：pydantic 基类会把类属性当字段处理）
+_SBX_ARTIFACT_DIR = "/tmp/plaita-gate"
+
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
 
@@ -120,9 +123,6 @@ class GateNode(Node):
                 "stderr": _clip_tail(stderr or "", _STDERR_CAP),
                 "retries": max(0, attempt), "dry_run": False}
 
-    # 宿主工件注入的沙箱落点前缀
-    _SBX_ARTIFACT_DIR = "/tmp/plaita-gate"
-
     @classmethod
     def _inject_host_artifacts(cls, driver, handle, cmd: list) -> tuple:
         """把 argv 里引用的**宿主绝对路径文件**上传到沙箱并改写为沙箱路径。
@@ -141,7 +141,7 @@ class GateNode(Node):
             if cand is None or not cand.is_file():
                 out.append(token)
                 continue
-            remote = f"{cls._SBX_ARTIFACT_DIR}/{cand.name}"
+            remote = f"{_SBX_ARTIFACT_DIR}/{cand.name}"
             if remote not in injected.values():
                 try:
                     driver.client.put_bytes(handle.id, remote, cand.read_bytes())
