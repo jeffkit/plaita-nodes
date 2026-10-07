@@ -186,6 +186,14 @@ class GateNode(Node):
         # 沙箱里没有这些宿主路径——把它们上传到沙箱同构位置并改写命令，
         # 门禁才能在沙箱内原样执行（否则报 "can't open file"）。
         cmd, injected = self._inject_host_artifacts(driver, handle, cmd)
+        # --cwd 归一：命令里的 `--cwd .` 依赖进程工作目录，而 gate_runner 判定
+        # 「本次改动」用的是 `--cwd` 指向的**仓库根**。沙箱里必须指向沙箱工作区
+        # （否则 changed_files=0、门在空目录里跑 → "no tests ran"）。
+        sbx_cwd = cwd or handle.path
+        cmd = [str(t) for t in cmd]
+        for i, tok in enumerate(cmd):
+            if tok == "--cwd" and i + 1 < len(cmd) and str(cmd[i + 1]) in (".", ""):
+                cmd[i + 1] = sbx_cwd
 
         attempts = 1 + max(0, self.max_retries)
         exit_code, stdout, stderr, attempt = 1, "", "", 0
