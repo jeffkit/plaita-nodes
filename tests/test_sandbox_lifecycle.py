@@ -57,13 +57,31 @@ class TestLifecycleCallback:
         assert cb.events[0]["outcome"] == "clean"
         assert driver.calls[-1] == ("release", handle_id("e1", "main"), True)
 
-    def test_unregistered_workspace_left_to_reaper(self):
+    def test_unregistered_spec_falls_back_to_handle_release(self):
+        """注册表反查失败时**按 handle 直接释放**（2026-10-07 修正）。
+
+        原行为「留给 reaper」对 remote-API 型 driver（AGS）是错的：它们全流程常
+        共用一个 spec 名而 ws_key 是流内键，反查必然落空；又**没有宿主侧 reaper**
+        （reaper 扫宿主目录）——于是回收器形同虚设。改为用快照里自带的
+        driver/id 释放；快照缺 driver/id 时才退回「留给兜底」。
+        """
         driver = RecordingDriver()
         cb = SandboxLifecycleCallback(sandboxes={}, drivers={"recording": driver})
         cb.on_node_end(flow=None, node=None, result={"workspace": _snapshot()})
         cb.on_flow_end(flow=None)
-        assert cb.events[0]["outcome"].startswith("no-spec")
-        assert driver.calls == []
+        assert "released-by-handle" in cb.events[0]["outcome"], cb.events
+        assert ("release", _snapshot()["id"], True) in driver.calls, driver.calls
+        assert not any(c[0] == "ensure" for c in driver.calls), driver.calls
+
+    def test_snapshot_without_driver_left_to_timeout_fallback(self):
+        """快照连 driver 都没有（异常形态）→ 退回 AGS 侧 timeout 兜底，不崩。"""
+        driver = RecordingDriver()
+        cb = SandboxLifecycleCallback(sandboxes={}, drivers={"recording": driver})
+        cb.on_node_end(flow=None, node=None,
+                       result={"workspace": {"id": "e9:main", "ws_key": "main"}})
+        cb.on_flow_end(flow=None)
+        assert cb.events[0]["outcome"].startswith("no-spec"), cb.events
+        assert driver.calls == [], driver.calls
 
     def test_single_failure_does_not_block_others(self):
         class BoomDriver(RecordingDriver):
@@ -265,3 +283,62 @@ class TestGitPublishTripwire:
         with _warnings.catch_warnings():
             _warnings.simplefilter("error")   # 任何 warning 都算失败
             node.execute(CtxExec())
+
+
+# ── AGS/remote-API 回退：无 spec 反查也能释放（2026-10-07 实证缺口）────────
+
+def test_release_by_handle_when_spec_missing():
+    """注册表只有一个 spec 名（如 "ags"）、ws_key 是流内键（"main"）——
+    `specs.get(ws_key)` 落空时，须用快照里的 driver+id 直接释放，
+    否则 AGS 这类无宿主 reaper 的 driver 永远不被回收。"""
+    from plaita_nodes.lifecycle import SandboxLifecycleCallback
+    from plaita_nodes.sandbox import WorkspaceSpec
+
+    released = []
+
+    class _FakeDriver:
+        def release(self, handle, keep_data=True, spec=None):
+            released.append((handle.id, handle.driver, keep_data))
+        def ensure(self, *a, **k):  # 不应被调用（回退路径不做 spec 反查）
+            raise AssertionError("回退路径不应调用 ensure")
+
+    cb = SandboxLifecycleCallback(
+        sandboxes={"ags": WorkspaceSpec(name="ags", driver="ags", template="t")},
+        drivers={"ags": _FakeDriver()},
+    )
+    # 快照形态：driver 名 = spec 名 "ags"，ws_key = "main"（与 spec 键不同）
+    cb.on_node_end(None, None, result={"workspace": {
+        "id": "exec-1:main", "driver": "ags", "ws_key": "main", "path": "/home/user/plaita-ws/repo",
+    }})
+    cb.on_flow_end(None)
+    assert released == [("exec-1:main", "ags", True)], released
+    assert cb.events and "released-by-handle" in cb.events[-1]["outcome"], cb.events
+
+
+def test_release_still_uses_spec_path_when_key_matches():
+    """ws_key 恰与 spec 键同名时（docker 旧式命名），仍走规范路径。"""
+    from plaita_nodes.lifecycle import SandboxLifecycleCallback
+    from plaita_nodes.sandbox import WorkspaceSpec
+
+    used = {"ensure": 0}
+
+    class _FakeDriver:
+        def ensure(self, spec, exec_id, ws_key):
+            used["ensure"] += 1
+            from plaita_nodes.sandbox import WorkspaceHandle
+            return WorkspaceHandle(driver="docker", id="c1", path="/w",
+                                   ws_key=ws_key, execution_id=exec_id)
+        def release(self, handle, keep_data=True, spec=None):
+            used["released"] = handle.id
+        def wrap_argv(self, *a, **k): return []
+        def enforce(self, *a, **k): pass
+        def git(self, *a, **k): pass
+
+    cb = SandboxLifecycleCallback(
+        sandboxes={"work": WorkspaceSpec(name="work", driver="docker", image="i")},
+        drivers={"docker": _FakeDriver()},
+    )
+    cb.on_node_end(None, None, result={"workspace": {
+        "id": "e2:work", "driver": "docker", "ws_key": "work", "path": "/w"}})
+    cb.on_flow_end(None)
+    assert used["ensure"] == 1 and used.get("released") == "c1", used
