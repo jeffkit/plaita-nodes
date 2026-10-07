@@ -192,3 +192,44 @@ def test_gate_sandbox_unregistered_fails_closed(monkeypatch):
     import pytest as _pytest
     with _pytest.raises(ValueError, match="未注册"):
         GateNode(id="g3", command="true", sandbox="nope").execute(_Exec())
+
+
+def test_gate_sandbox_uses_root_execution_id_inside_childflow(monkeypatch):
+    """childflow 内（子上下文）也必须用**根执行** id 派生实例：子上下文另铸
+    ``$EXECUTION_ID``，直接取 ``execution.execution_id`` 会 ensure() 不到 agent
+    的实例而新建空沙箱（2026-10-07 实测：gate_once 里的门禁在空目录里跑成
+    ``changed_files=0`` / "no tests ran"）。"""
+    from plaita_nodes import sandbox as sb
+    from plaita_nodes.gate import GateNode
+    from plaita_nodes.sandbox import WorkspaceHandle, WorkspaceSpec
+
+    calls = {}
+
+    class _FakeClient:
+        def exec_argv(self, instance, argv, **kw):
+            return 0, "ok\n", ""
+
+    class _FakeRoot:
+        execution_id = "exec-root"
+
+    class _FakeDriver:
+        client = _FakeClient()
+        def ensure(self, spec, execution_id, ws_key):
+            calls["ensure"] = (spec.name, execution_id, ws_key)
+            return WorkspaceHandle(driver="ags", id="inst-9", path="/work",
+                                   ws_key=ws_key, execution_id=execution_id)
+
+    monkeypatch.setattr(sb, "load_sandboxes",
+                        lambda repo=None: {"ags": WorkspaceSpec(name="ags", driver="ags", template="t")})
+    monkeypatch.setattr(sb, "get_driver", lambda name: _FakeDriver())
+
+    class _ChildExec:
+        execution_id = "exec-child"          # 子流程上下文另铸的 id
+        parent = _FakeRoot()
+        def evaluate(self, v): return v
+        def get_global_variable(self, k, d=None): return False
+
+    out = GateNode(id="g4", command="true", gate_name="t", sandbox="ags",
+                   cwd="/work").execute(_ChildExec())
+    assert out["passed"] is True
+    assert calls["ensure"] == ("ags", "exec-root", "main")   # 根 id，不是 exec-child
