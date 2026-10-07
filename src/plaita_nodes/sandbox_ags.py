@@ -202,7 +202,11 @@ class AgsClient:
         """分块 base64 上传（数据面单次 payload 有上限；files.write 大文件超时）。"""
         b64 = base64.b64encode(data).decode("ascii")
         tmp = f"{remote_path}.b64"
-        self.exec_argv(instance_id, ["rm", "-f", tmp], timeout=60)
+        # 目标目录先建（调用方给的路径可能落在还不存在的目录，如 /tmp/plaita-gate/）
+        parent = str(remote_path).rsplit("/", 1)[0] or "/"
+        self.exec_argv(instance_id, ["bash", "-c",
+                                     f"mkdir -p {shlex.quote(parent)} && rm -f {shlex.quote(tmp)}"],
+                       timeout=60)
         t0 = time.time()
         for i in range(0, len(b64), chunk):
             piece = b64[i:i + chunk]
