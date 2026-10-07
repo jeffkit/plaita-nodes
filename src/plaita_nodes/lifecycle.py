@@ -82,13 +82,40 @@ class SandboxLifecycleCallback(FlowCallback):
             specs = sb.load_sandboxes(repo=self._repo)
         spec = specs.get(ws_key) or specs.get(str(snap.get("ws_key", "")))
         if spec is None:
-            return "no-spec(注册表已无此 workspace，资源留给 reaper)"
+            return self._release_by_handle(snap)
         driver = self._drivers.get(spec.driver) or sb.get_driver(spec.driver)
         if driver is None:
             return f"no-driver:{spec.driver}"
         handle = driver.ensure(spec, exec_id, ws_key)  # 幂等 attach / 按名重建
         return sb.suspend_release(driver, handle, spec, redactor=self._redactor,
                                   keep_data=self._keep_data)
+
+    def _release_by_handle(self, snap: Dict[str, Any]) -> str:
+        """回退路径：直接用快照里的 driver + id 释放（不做 spec 反查）。
+
+        为什么需要：**remote-API 型 driver（AGS）的反查不成立**——这类部署全流程
+        常共用一个 spec 名（registry 键如 "ags"），而 ws_key 是流内键（如 "main"），
+        `specs.get(ws_key)` 必然落空；且它们没有宿主侧 reaper 兜底（reaper 扫宿主
+        目录，远端实例不在其中）。没有这条回退，装了回收器也会**从不回收**。
+        仅做 release（不 wip_push——那需要 spec 的 provision 信息）；AGS 上 release
+        默认即 kill，实例销毁后数据一并回收。
+        """
+        name = str(snap.get("driver") or "")
+        sid = str(snap.get("id") or "")
+        if not name or not sid:
+            return "no-spec(快照缺 driver/id，留给 AGS 侧 timeout 兜底)"
+        driver = self._drivers.get(name) or sb.get_driver(name)
+        if driver is None:
+            return f"no-driver:{name}"
+        try:
+            handle = sb.WorkspaceHandle(
+                driver=name, id=sid, path=str(snap.get("path") or ""),
+                ws_key=str(snap.get("ws_key") or ""),
+                execution_id=str(sid).partition(":")[0])
+            driver.release(handle, keep_data=self._keep_data)
+            return f"released-by-handle({name})"
+        except Exception as exc:  # noqa: BLE001 — 尽力而为，AGS timeout 兜底
+            return f"handle-release-error: {exc}"
 
     # ── 观测 ────────────────────────────────────────────────────────────
     @property
