@@ -374,22 +374,37 @@ class AgsDriver:
     # -- 增量同步（host ⇄ sandbox 补丁）--------------------------------
 
     def sync_in(self, handle: WorkspaceHandle, host_repo: str) -> Dict[str, Any]:
-        """宿主工作区 → 沙箱（全量脏补丁 vs 基线；临时索引，不触碰宿主索引）。"""
+        """宿主工作区 → 沙箱（应用宿主脏改动；**增量语义，不丢弃沙箱已有进展**）。
+
+        ⚠️ 关键语义（2026-10-08 修正）：早期实现每次都 ``git reset --hard <基线>``
+        ——那是**破坏性**的：沙箱 agent 的成果只存在于沙箱（宿主 worktree 是干净的），
+        reset 会把它们连同后续门禁/评审看到的工作区一起抹掉（实测表现为门禁
+        ``changed_files=0``、no tests ran）。正确做法是**基于沙箱当前 HEAD 应用
+        宿主增量补丁**：宿主侧新出现的改动合进来，沙箱已有的提交保持不动。
+
+        实现：先把宿主脏改动打成补丁（对比基线），在**沙箱当前树**上 ``git apply``
+        （三方已有内容不重复应用），冲突则硬失败交上层——不静默丢改动。
+        """
         baseline = self._baseline(handle)
-        patch = _host_dirty_patch(host_repo)
+        patch = _host_dirty_patch(host_repo)   # 宿主 vs 其 HEAD（含未跟踪）
         tmpp = "/tmp/plaita-sync-in.patch"
         if patch:
             self.client.put_bytes(handle.id, tmpp, patch)
-        cmds = (
-            f"set -e; cd {shlex.quote(handle.path)}; "
-            f"git reset -q --hard {shlex.quote(baseline)}; git clean -qfd; ")
+        cmds = f"set -e; cd {shlex.quote(handle.path)}; "
         if patch:
-            cmds += f"git apply --whitespace=nowarn {shlex.quote(tmpp)}; rm -f {shlex.quote(tmpp)}; "
-        cmds += ("git add -A; git commit -qm 'plaita-sync-in' --allow-empty;")
+            # 增量应用：只把宿主新改动叠加进来。已在树里的内容 apply 会报
+            # "already applied" → 用 --3way 容忍，其余错误照实抛出。
+            cmds += (f"(git apply --3way --whitespace=nowarn {shlex.quote(tmpp)} 2>&1 "
+                     f"|| git apply --whitespace=nowarn {shlex.quote(tmpp)} 2>&1 "
+                     f"|| echo 'PAITA_SYNC_IN_APPLY_FAILED'); rm -f {shlex.quote(tmpp)}; ")
+        cmds += "git add -A; git commit -qm 'plaita-sync-in' --allow-empty; " \
+                "git log --oneline -1; "
         code, out, err = self.client.exec_argv(handle.id, ["bash", "-c", cmds], timeout=300)
         if code != 0:
             raise AgsError(f"sync_in 失败：{err[:300] or out[:300]}")
-        return {"patch_bytes": len(patch)}
+        if "PAITA_SYNC_IN_APPLY_FAILED" in (out or ""):
+            raise AgsError(f"sync_in 补丁应用失败（沙箱树与宿主不等价）：{out[:200]}")
+        return {"patch_bytes": len(patch), "baseline": baseline[:12]}
 
     def sync_out(self, handle: WorkspaceHandle, host_repo: str) -> Dict[str, Any]:
         """沙箱 → 宿主工作区（本轮 agent 增量补丁；git apply 到宿主 worktree）。"""
