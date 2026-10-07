@@ -79,6 +79,33 @@ class SandboxAgentNode(AgentRunNode):
                     "usage": None, "dry_run": True}
         return self._execute_ags(execution, agent_name, str(prompt), repo, session_id)
 
+    # ── 分流释放（失败/取消路径）：可按需改成保现场 ───────────────────────
+
+    @staticmethod
+    def _release_on_failure(driver, handle, synced: bool = True) -> None:
+        """失败/取消路径的资源处置——**按现场是否已落宿主分流**。
+
+        - ``synced=True``（改动已 sync_out 回宿主/Git）：kill 即可，省费用；
+        - ``synced=False``（中间态只在沙箱磁盘里）：**pause 保现场**——kill 会
+          连同那份「Git 里没有、宿主也没有」的改动一起删掉，agent 的活白干；
+          同时把实例标成 ``plaita_orphan=needs-triage``，便于日后清理。
+
+        任何异常都吞掉（回收失败不能掩盖原始失败原因；AGS 侧 timeout 兜底）。
+        """
+        try:
+            if synced:
+                driver.release(handle, keep_data=False)
+            else:
+                drv = getattr(driver, "client", None)
+                if drv is not None and hasattr(drv, "pause"):
+                    drv.pause(handle.id)
+                else:  # 无 pause 能力的 driver（本地 docker 等）退回 release
+                    driver.release(handle, keep_data=True)
+                _log.warning("sandbox_agent: 现场未同步成功，已 pause 保留实例 %s",
+                             handle.id)
+        except Exception as exc:  # noqa: BLE001 — 尽力而为
+            _log.warning("sandbox_agent: 失败路径资源处置异常：%s", exc)
+
     # ── AGS 执行主链 ────────────────────────────────────────────────────
 
     def _execute_ags(self, execution: Any, agent_name: str, prompt: str,
@@ -166,15 +193,27 @@ class SandboxAgentNode(AgentRunNode):
                            on_protocol_line=_on_protocol_line),
             )
             if getattr(result, "exit_code", 0) == _ap_exit_cancelled():
-                driver.enforce(handle)  # 取消：远端进程不可单独回收 → 击杀实例
-                raise AgentRunError("agent 沙箱执行被取消（cancel_event 命中）")
-            if result.error or result.exit_code != 0:
-                # 失败也保留现场：把沙箱侧已有改动同步回宿主（与直跑语义一致）
+                # 取消：远端进程不可单独回收 → 击杀实例。但仍先尽力把已有改动
+                # 捞回宿主（取消前 agent 可能已改了不少），再释放。
                 if repo:
                     try:
                         driver.sync_out(handle, repo)
                     except Exception as exc:  # noqa: BLE001
+                        _log.warning("sandbox_agent: 取消路径 sync_out 未完成：%s", exc)
+                self._release_on_failure(driver, handle)
+                raise AgentRunError("agent 沙箱执行被取消（cancel_event 命中）")
+            if result.error or result.exit_code != 0:
+                # 失败也保留现场：先把沙箱侧已有改动同步回宿主（与直跑语义一致）
+                synced = True
+                if repo:
+                    try:
+                        driver.sync_out(handle, repo)
+                    except Exception as exc:  # noqa: BLE001
+                        synced = False
                         _log.warning("sandbox_agent: 失败路径 sync_out 未完成：%s", exc)
+                # 分流释放：同步成功=改动已在宿主/Git，可 kill（省费用）；
+                # 同步失败=中间态只在沙箱里 → **pause 保现场**，绝不能 kill。
+                self._release_on_failure(driver, handle, synced=synced)
                 raise AgentRunError(
                     redactor.redact(result.error or f"{agent_name} 退出码 {result.exit_code}"))
 
