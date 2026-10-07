@@ -57,6 +57,12 @@ class GateNode(Node):
     command: Optional[Any] = None
     gate_name: str = Field(default="quality-gate")
     cwd: Optional[Any] = None
+    # 沙箱执行（可选）：填 `.plaita/sandboxes.json` 里的 spec 名即**在沙箱内
+    # 跑该门禁**（复用 agent 的实例与工作区、经代理通道执行）。留空 = 宿主执行，
+    # 既有行为逐字节不变。填了之后 cwd 语义变为沙箱内路径（通常与 agent 的
+    # workspace 一致——从而「在 agent 改过的同一棵树上」验证）。
+    sandbox: Optional[Any] = None
+    ws_key: Optional[Any] = None
     # Any 而非 int：DSL 传参下是 "$INPUT.gate_timeout_secs" 表达式串（pydantic
     # 会在构造期拒收 str 进 int 字段），execute 内求值后再转 int
     timeout_secs: Any = Field(default=600)
@@ -79,6 +85,10 @@ class GateNode(Node):
         if dry:
             return {"passed": True, "gate": self.gate_name, "exit_code": 0,
                     "stdout": "[dry-run]", "stderr": "", "retries": 0, "dry_run": True}
+
+        # 沙箱分支：填了 sandbox 即在沙箱内执行（同实例、同工作区、代理通道）
+        if self.sandbox is not None:
+            return self._execute_in_sandbox(execution, cmd, timeout_secs)
 
         env = os.environ.copy()
         exit_code, stdout, stderr = 1, "", ""
@@ -106,3 +116,47 @@ class GateNode(Node):
                 "exit_code": exit_code, "stdout": _clip_tail(stdout or "", _STDOUT_CAP),
                 "stderr": _clip_tail(stderr or "", _STDERR_CAP),
                 "retries": max(0, attempt), "dry_run": False}
+
+    def _execute_in_sandbox(self, execution: Any, cmd: list, timeout_secs: int) -> dict:
+        """在沙箱内执行门禁命令（复用 SANDBOX_AGENT 的实例与工作区）。
+
+        为什么值得：门禁（pytest/cargo/clippy）是流水线最重的部分——宿主执行
+        意味着每台 worker 都要备齐工具链与足够算力；下沉沙箱后宿主只做编排，
+        重活与依赖都在镜像里，机器更轻、并发可更高。
+
+        实现走既有代理通道（与 SANDBOX_AGENT 同一套 driver/实例/环境注入），
+        因此天然共享同一工作区——**在 agent 改过的同一棵树上跑门禁**，无需补丁往返。
+        """
+        from . import sandbox as sb
+
+        sandbox_name = str(execution.evaluate(self.sandbox) or "").strip()
+        ws_key = str(execution.evaluate(self.ws_key) or "main").strip()
+        execution_id = str(getattr(execution, "execution_id", "") or "")
+        if not execution_id:
+            raise ValueError("gate 沙箱执行缺 execution_id（无法定位实例）")
+        spec = sb.load_sandboxes().get(sandbox_name)
+        if spec is None:
+            raise ValueError(f"gate 沙箱 '{sandbox_name}' 未注册（fail-closed）")
+        driver = sb.get_driver(spec.driver)
+        if driver is None:
+            raise ValueError(f"gate 沙箱 driver '{spec.driver}' 未注册")
+
+        handle = driver.ensure(spec, execution_id, ws_key)   # 幂等 attach 同一实例
+        cwd = str(execution.evaluate(self.cwd) or handle.path or "")
+        envs = {str(k): str(v) for k, v in (spec.env or {}).items()}
+
+        attempts = 1 + max(0, self.max_retries)
+        exit_code, stdout, stderr, attempt = 1, "", "", 0
+        for attempt in range(attempts):
+            try:
+                exit_code, stdout, stderr = driver.client.exec_argv(
+                    handle.id, ["bash", "-c", " ".join(shlex.quote(c) for c in cmd)],
+                    envs=envs or None, cwd=cwd or None, timeout=timeout_secs)
+            except Exception as exc:  # noqa: BLE001 — 基础设施错误按门失败上报
+                exit_code, stdout, stderr = 1, "", f"gate sandbox exec error: {exc}"
+            if exit_code == 0:
+                break
+        return {"passed": exit_code == 0, "gate": self.gate_name,
+                "exit_code": exit_code, "stdout": _clip_tail(stdout or "", _STDOUT_CAP),
+                "stderr": _clip_tail(stderr or "", _STDERR_CAP),
+                "retries": max(0, attempt), "dry_run": False, "sandbox": handle.id}

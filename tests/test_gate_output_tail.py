@@ -116,3 +116,79 @@ def test_gate_dry_run_writes_nothing(tmp_path):
     out = _gate(tmp_path, command, {"dry_run": True})
     assert out["passed"] is True and out["stdout"] == "[dry-run]"
     assert _new_files(tmp_path) == [], "dry-run 下不应产生新文件"
+
+
+# ── 沙箱执行分支（2026-10-07）：填 sandbox 走沙箱，不填行为不变 ─────────────
+
+def test_gate_default_stays_host(monkeypatch, tmp_path):
+    """不填 sandbox → 宿主执行（既有行为），不触任何沙箱依赖。"""
+    from plaita_nodes.gate import GateNode
+
+    class _Exec:
+        execution_id = "e1"
+        def evaluate(self, v): return v
+        def get_global_variable(self, k, d=None): return False
+
+    node = GateNode(id="g1", command="true", gate_name="t", cwd=str(tmp_path))
+    out = node.execute(_Exec())
+    assert out["passed"] is True
+    assert "sandbox" not in out          # 宿主路径不产出该键
+    assert out["exit_code"] == 0
+
+
+def test_gate_sandbox_branch_dispatches_to_driver(monkeypatch, tmp_path):
+    """填 sandbox → 经 driver 在沙箱内执行，且 cwd/实例来自同一 handle。"""
+    from plaita_nodes import sandbox as sb
+    from plaita_nodes.gate import GateNode
+    from plaita_nodes.sandbox import WorkspaceHandle, WorkspaceSpec
+
+    calls = {}
+
+    class _FakeClient:
+        def exec_argv(self, instance, argv, **kw):
+            calls["instance"] = instance
+            calls["argv"] = argv
+            calls["cwd"] = kw.get("cwd")
+            calls["timeout"] = kw.get("timeout")
+            return 0, "all good\n", ""
+
+    class _FakeDriver:
+        client = _FakeClient()
+        def ensure(self, spec, execution_id, ws_key):
+            calls["ensure"] = (spec.name, execution_id, ws_key)
+            return WorkspaceHandle(driver="ags", id="inst-9", path="/work",
+                                   ws_key=ws_key, execution_id=execution_id)
+
+    monkeypatch.setattr(sb, "load_sandboxes",
+                        lambda repo=None: {"ags": WorkspaceSpec(name="ags", driver="ags", template="t")})
+    monkeypatch.setattr(sb, "get_driver", lambda name: _FakeDriver())
+
+    class _Exec:
+        execution_id = "exec-42"
+        def evaluate(self, v): return v
+        def get_global_variable(self, k, d=None): return False
+
+    node = GateNode(id="g2", command="python3 -m pytest -q", gate_name="tests",
+                    sandbox="ags", cwd="/home/user/plaita-ws/repo")
+    out = node.execute(_Exec())
+    assert out["passed"] is True and out["sandbox"] == "inst-9"
+    assert calls["ensure"] == ("ags", "exec-42", "main")     # 与 agent 同实例键
+    assert calls["cwd"] == "/home/user/plaita-ws/repo"
+    assert "pytest" in " ".join(calls["argv"])
+
+
+def test_gate_sandbox_unregistered_fails_closed(monkeypatch):
+    """spec 未注册 → 直接报错（不静默退化成宿主执行——那会让"沙箱化"变假象）。"""
+    from plaita_nodes import sandbox as sb
+    from plaita_nodes.gate import GateNode
+
+    monkeypatch.setattr(sb, "load_sandboxes", lambda repo=None: {})
+
+    class _Exec:
+        execution_id = "e3"
+        def evaluate(self, v): return v
+        def get_global_variable(self, k, d=None): return False
+
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="未注册"):
+        GateNode(id="g3", command="true", sandbox="nope").execute(_Exec())
