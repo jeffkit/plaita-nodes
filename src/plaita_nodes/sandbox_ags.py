@@ -301,8 +301,19 @@ class AgsDriver:
 
     def release(self, handle: WorkspaceHandle, keep_data: bool = True,
                 spec: Optional[WorkspaceSpec] = None) -> None:
-        mode = str(((spec.resources if spec else {}) or {}).get("keep_release") or "kill")
-        if keep_data and mode == "pause":
+        """释放计算层。**keep_data=True → pause（保实例磁盘，可恢复）；False → kill**。
+
+        语义修正（2026-10-07）：此前由 spec 的 ``keep_release`` 单值决定，导致
+        「谁调都一样」——即使失败路径想保现场，也被全局 kill 覆盖。现改为
+        **以调用方的 keep_data 为准**（这正是 SandboxDriver 协议的原意）；
+        spec 的 ``keep_release`` 仅作未显式指定时的缺省（缺省 kill）。
+        调用方分流：正常完成（改动已 sync_out 回 Git）→ keep_data=False；
+        失败/挂起（中间态只在沙箱）→ keep_data=True 保现场。
+        """
+        default_pause = str(((spec.resources if spec else {}) or {})
+                            .get("keep_release") or "kill") == "pause"
+        keep = bool(keep_data) or (spec is None and default_pause)
+        if keep:
             self.client.pause(handle.id)
         else:
             self.client.kill(handle.id)

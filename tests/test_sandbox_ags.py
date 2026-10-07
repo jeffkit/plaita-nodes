@@ -150,17 +150,29 @@ def test_ensure_missing_template_fails():
 
 # ── release 模式 ───────────────────────────────────────────────────────
 
-def test_release_kill_default_pause_when_configured():
+def test_release_keep_data_drives_pause_vs_kill():
+    """release 的 pause/kill **由调用方的 keep_data 决定**（协议原意）。
+
+    语义修正（2026-10-07）：此前由 spec.keep_release 单值决定 → 失败路径想
+    保现场也被全局 kill 覆盖。现：keep_data=True→pause（保实例磁盘可恢复）、
+    False→kill；spec.keep_release 仅作无 spec 时的缺省。调用方据此分流：
+    正常完成（已 sync_out 回 Git）→kill，失败/挂起（中间态只在沙箱）→pause。
+    """
     client = FakeClient()
     driver = sa.AgsDriver(client=client)
     handle = sb.WorkspaceHandle(driver="ags", id="i1", path="/w", ws_key="main",
                                 execution_id="e")
-    driver.release(handle, keep_data=True, spec=WorkspaceSpec(name="s", driver="ags"))
-    driver.release(handle, keep_data=True,
-                   spec=WorkspaceSpec(name="s", driver="ags",
-                                      resources={"keep_release": "pause"}))
-    assert ("kill", "i1") in client.calls
+    spec_kill = WorkspaceSpec(name="s", driver="ags",
+                              resources={"keep_release": "kill"})
+    # keep_data=True 显式保数据 → 即便 spec 缺省是 kill，也必须 pause
+    driver.release(handle, keep_data=True, spec=spec_kill)
     assert ("pause", "i1") in client.calls
+    # keep_data=False（正常完成）→ kill
+    driver.release(handle, keep_data=False, spec=spec_kill)
+    assert ("kill", "i1") in client.calls
+    # 无 spec 时退回 spec 缺省语义（无 spec → 走 code 里的缺省分支）
+    driver.release(handle, keep_data=False, spec=None)
+    assert ("kill", "i1") in client.calls
 
 
 # ── 供给载荷（真 git）──────────────────────────────────────────────────
