@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shlex
 import signal
+import logging
 import subprocess
 import time
 from typing import Any, ClassVar, Optional
@@ -22,6 +23,8 @@ from typing import Any, ClassVar, Optional
 from pydantic import Field
 
 from plaita import Node
+
+_log = logging.getLogger(__name__)
 
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
@@ -117,6 +120,39 @@ class GateNode(Node):
                 "stderr": _clip_tail(stderr or "", _STDERR_CAP),
                 "retries": max(0, attempt), "dry_run": False}
 
+    # 宿主工件注入的沙箱落点前缀
+    _SBX_ARTIFACT_DIR = "/tmp/plaita-gate"
+
+    @classmethod
+    def _inject_host_artifacts(cls, driver, handle, cmd: list) -> tuple:
+        """把 argv 里引用的**宿主绝对路径文件**上传到沙箱并改写为沙箱路径。
+
+        只处理「存在且是文件」的绝对路径参数——既覆盖 `gate_runner.py` 这类
+        脚本，也覆盖 `--spec /tmp/.../gates.json` 这类数据文件。上传用 driver 的
+        分块通道（与仓库供给同款，带 sha 校验）。返回 (改写后的 argv, 注入表)。
+        """
+        from pathlib import Path
+
+        injected: dict = {}
+        out: list = []
+        for token in cmd:
+            text = str(token)
+            cand = Path(text) if text.startswith("/") else None
+            if cand is None or not cand.is_file():
+                out.append(token)
+                continue
+            remote = f"{cls._SBX_ARTIFACT_DIR}/{cand.name}"
+            if remote not in injected.values():
+                try:
+                    driver.client.put_bytes(handle.id, remote, cand.read_bytes())
+                    injected[str(cand)] = remote
+                except Exception as exc:  # noqa: BLE001 — 注入失败保留原令牌（让错误可见）
+                    _log.warning("gate: 宿主工件注入失败 %s: %s", cand, exc)
+                    out.append(token)
+                    continue
+            out.append(remote)
+        return out, injected
+
     def _execute_in_sandbox(self, execution: Any, cmd: list, timeout_secs: int) -> dict:
         """在沙箱内执行门禁命令（复用 SANDBOX_AGENT 的实例与工作区）。
 
@@ -144,6 +180,12 @@ class GateNode(Node):
         handle = driver.ensure(spec, execution_id, ws_key)   # 幂等 attach 同一实例
         cwd = str(execution.evaluate(self.cwd) or handle.path or "")
         envs = {str(k): str(v) for k, v in (spec.env or {}).items()}
+
+        # 宿主脚本/产物注入：门禁命令常引用**宿主路径**的脚本与 spec 文件
+        # （如 `python3 <宿主>/flows/gates/gate_runner.py --spec /tmp/xxx/gates.json`）。
+        # 沙箱里没有这些宿主路径——把它们上传到沙箱同构位置并改写命令，
+        # 门禁才能在沙箱内原样执行（否则报 "can't open file"）。
+        cmd, injected = self._inject_host_artifacts(driver, handle, cmd)
 
         attempts = 1 + max(0, self.max_retries)
         exit_code, stdout, stderr, attempt = 1, "", "", 0
