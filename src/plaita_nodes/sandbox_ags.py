@@ -442,11 +442,27 @@ def _proxy_argv(instance_id: str, envfile: str, cwd: str, timeout_secs: int) -> 
             "--cwd", str(cwd), "--timeout", str(int(timeout_secs)), "--"]
 
 
+# AGS 控制面凭据。代理（ags_exec）是**本地子进程**，其环境由 agentproc 组装：
+# ``build_base_env()``（仅 INFRA 白名单 PATH/HOME/…）+ profile env + extra_env——
+# **不继承宿主 env**（runner.py「The child env is built from exactly three layers」）。
+# 所以凭据必须显式经 extra_env（本函数拿到的 env 正是这一层）下发，否则报
+# 「ags_exec: 缺少 E2B_DOMAIN / E2B_API_KEY」（2026-10-08 远端实测 245 次，
+# 整条沙箱流程空转）。密钥面：只进代理子进程，不进沙箱容器（容器 env 走 envfile）。
+AGS_CREDENTIAL_ENV = ("E2B_DOMAIN", "E2B_API_KEY")
+
+
 def wrap_argv_from_env(env: Dict[str, str], agent_argv: list) -> list:
-    """sandbox.py 分派入口：env 旋钮 → 代理 argv（与 docker/krunvm 同形）。"""
+    """sandbox.py 分派入口：env 旋钮 → 代理 argv（与 docker/krunvm 同形）。
+
+    副作用：把宿主 env 里的 AGS 凭据**补进** ``env``（= agentproc 的 extra_env
+    层）；已有值不覆盖（spec/调用方显式指定优先）。
+    """
     instance = env.get("PLAITA_SANDBOX_NAME") or ""
     if not instance:
         raise SandboxConfigError("ags 包装缺 PLAITA_SANDBOX_NAME（实例 id）")
+    for key in AGS_CREDENTIAL_ENV:
+        if not env.get(key) and os.environ.get(key):
+            env[key] = os.environ[key]
     return _proxy_argv(
         instance,
         env.get("PLAITA_SANDBOX_ENVFILE") or "",

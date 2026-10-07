@@ -114,6 +114,36 @@ def test_wrap_argv_from_env_requires_instance():
         sb.wrap_agent_argv_from_env(env, ["recursive"])
 
 
+def test_wrap_argv_from_env_injects_ags_credentials(monkeypatch):
+    """代理进程跑在 agentproc 白名单子进程环境里（build_base_env 不继承宿主
+    env）——E2B 凭据必须由 wrap 副作用补进 extra_env（2026-10-08 远端 245 次
+    「ags_exec: 缺少 E2B_DOMAIN / E2B_API_KEY」的根因）。已有值不覆盖。"""
+    monkeypatch.setenv("E2B_DOMAIN", "d.example")
+    monkeypatch.setenv("E2B_API_KEY", "k-123")
+    env = {"PLAITA_SANDBOX_DRIVER": "ags", "PLAITA_SANDBOX_NAME": "inst-1",
+           "PLAITA_SANDBOX_PATH": "/work"}
+    argv = sb.wrap_agent_argv_from_env(env, ["recursive", "--version"])
+    assert argv[-2:] == ["recursive", "--version"]
+    assert env["E2B_DOMAIN"] == "d.example" and env["E2B_API_KEY"] == "k-123"
+
+    # 显式指定优先（未被宿主 env 覆盖）
+    env2 = {"PLAITA_SANDBOX_DRIVER": "ags", "PLAITA_SANDBOX_NAME": "inst-2",
+            "E2B_API_KEY": "explicit-key"}
+    sb.wrap_agent_argv_from_env(env2, ["recursive"])
+    assert env2["E2B_API_KEY"] == "explicit-key"
+
+
+def test_wrap_argv_from_env_missing_creds_still_wraps(monkeypatch):
+    """宿主也没有凭据时不在这里抛错——代理自身会给出可操作的报错，
+    wrap 保持纯包装语义（避免破坏无需数据面的用例）。"""
+    monkeypatch.delenv("E2B_DOMAIN", raising=False)
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    env = {"PLAITA_SANDBOX_DRIVER": "ags", "PLAITA_SANDBOX_NAME": "inst-3"}
+    argv = sb.wrap_agent_argv_from_env(env, ["recursive"])
+    assert "ags_exec" in " ".join(argv)
+    assert "E2B_API_KEY" not in env
+
+
 # ── ensure 幂等 / 供给 ─────────────────────────────────────────────────
 
 def test_ensure_creates_then_attaches(host_repo):
