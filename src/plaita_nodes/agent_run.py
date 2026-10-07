@@ -20,6 +20,11 @@
 ``.plaita/sandboxes.json`` 里的名字，可表达式）即进沙箱——driver 产包裹 argv，
 agentproc runner 仍是唯一执行者；密钥只经 envfile 进容器，回传经 canary 脱敏。
 ``repo`` 直跑路径与无 workspace 的存量 flow 行为逐字节不变。
+
+多租户 fail-closed（#5）：租户上下文非 default 时 ``repo`` 直跑默认拒绝
+（``PLAITA_ALLOW_HOST_AGENT_RUN=1`` 由部署方显式放开）——直跑是 agent CLI 在
+worker 宿主上免审批执行，只有沙箱才有 VM 边界。流式辅助路径
+``recursive_stream_turn`` 的宿主 env 同样经白名单重建。
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ from pydantic import Field
 
 from plaita import Node
 
+from ._subprocess_env import build_subprocess_env
 from .config import EXECUTOR_ALIASES, resolve_agent
 
 
@@ -53,6 +59,42 @@ def _ap_exit_cancelled() -> int:
 
 
 _log = logging.getLogger(__name__)
+
+# 多租户直跑 fail-closed（#5）：租户任务的 agent 默认只能进沙箱（``workspace``），
+# 宿主直跑要部署方显式放开——直跑 = agent CLI 在 worker 宿主上免审批执行，
+# 能读平台凭据与其它租户的产物。
+HOST_RUN_OPT_OUT_ENV = "PLAITA_ALLOW_HOST_AGENT_RUN"
+_opt_out_warned = False
+
+
+def _multi_tenant_scope() -> Optional[str]:
+    """多租户档的当前租户 id；单租户（无租户上下文 / default 租户）→ None。"""
+    try:
+        from plaita.tenant_context import DEFAULT_TENANT_ID, current_tenant
+    except ImportError:  # plaita 0.5.x 无租户上下文 = 单租户
+        return None
+    tenant = current_tenant() or DEFAULT_TENANT_ID
+    return None if tenant == DEFAULT_TENANT_ID else tenant
+
+
+def _host_run_denied() -> Optional[str]:
+    """宿主直跑应被拒时返回租户 id（None = 放行）。
+
+    单机信任部署可显式设 ``PLAITA_ALLOW_HOST_AGENT_RUN=1`` 回到历史行为
+    （每次进程生命周期内告警一次）。
+    """
+    tenant = _multi_tenant_scope()
+    if tenant is None:
+        return None
+    if os.environ.get(HOST_RUN_OPT_OUT_ENV, "").strip() == "1":
+        global _opt_out_warned
+        if not _opt_out_warned:
+            _opt_out_warned = True
+            _log.warning("多租户 agent 宿主直跑被 %s=1 放行（tenant=%s）："
+                         "agent 及其子进程可读宿主凭据，仅限单机信任部署",
+                         HOST_RUN_OPT_OUT_ENV, tenant)
+        return None
+    return tenant
 
 
 def _run_lock_key(workspace: str, run_key: Optional[str] = None) -> str:
@@ -352,6 +394,13 @@ class AgentRunNode(Node):
                     "workspace 与 repo 互斥：workspace=沙箱执行，repo=宿主直跑路径，二选一")
             return self._execute_sandboxed(execution, agent_name, str(prompt))
 
+        denied_tenant = _host_run_denied()
+        if denied_tenant:
+            raise AgentRunError(
+                f"多租户（tenant={denied_tenant}）不允许 agent 宿主直跑：节点声明 "
+                f"workspace 走沙箱执行（VM 边界 + 密钥只经 envfile 进容器）；"
+                f"单机信任部署可显式设 {HOST_RUN_OPT_OUT_ENV}=1 放行")
+
         profile = resolve_agent(agent_name, repo=repo)
         executor = profile["executor"]
 
@@ -645,8 +694,9 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     if agent.get("model"):
         env_extra.setdefault("RECURSIVE_MODEL", agent["model"])
     argv = handlers["build_args"](task, "", env_extra)
-    # 子进程必须拿到 provider 凭证 env（否则无凭证运行得到空回复）
-    proc_env = {**os.environ, **env_extra}
+    # 子进程必须拿到 provider 凭证 env（否则无凭证运行得到空回复）；宿主
+    # 其余环境经公共层白名单过滤，不整份继承（见 _subprocess_env）
+    proc_env = build_subprocess_env(env_extra)
     # 独立进程组：超时 killpg 连 agent 拉起的子树一起清（同 capture/gate 形态）
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, cwd=workspace, env=proc_env,

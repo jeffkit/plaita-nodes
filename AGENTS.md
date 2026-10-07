@@ -29,6 +29,7 @@
 - `src/plaita_nodes/decision.py` — DecisionNode + `DECISION_PROVIDERS` 注册表（`llm` / `jev` 过渡契约 / 自定义注册）
 - `src/plaita_nodes/agent_run.py` — AgentRunNode + `recursive-direct` executor（语义 = flowcast runRecursiveDirect）
 - `src/plaita_nodes/_hitl_client.py` — hitl/hitl_await 共享发送协议层（send/图片降级/解析，协议细节只改这里）
+- `src/plaita_nodes/_subprocess_env.py` — spawn 子进程的 env 白名单 + 输出截断接入层（优先 plaita 公共层 `plaita.subprocess_env`，兄弟仓 checkout 早于 plaita#30 时本仓兜底；gate/capture/agent 直跑只 import 这里）
 - `src/plaita_nodes/hitl_poller.py` — Distributed 模式恢复桥（`python -m plaita_nodes.hitl_poller`，轮询 session → EventBus 发布 hitl_reply）
 - `src/plaita_nodes/notify_backends.py` — 通知 backend 注册表（NOTIFY_BACKENDS，先例 DECISION_PROVIDERS；新通知渠道只加 backend 不加节点，webhook×4/email_send 为薄壳委托）
 - `src/plaita_nodes/{api,database,email,webhooks}.py` — 凭据化连接器（`credential` 字段 → plaita.credentials 解密读取）

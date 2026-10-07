@@ -14,8 +14,8 @@ plaita 的**通用节点集**（infra 级）：把 plaita 声明式流程接到�
 | `agentrun` | Agent 运行 | **Agent 原子**：多步工具循环（模型可调工具自主多轮）。经 [agentproc](../agentproc) 调用 Agent CLI（recursive / claude）；配置复用 flowcast 的 `agents.json` / `providers.json`。开工前过 kill-before-start 遗言锁门（`preflight_workspace`），锁键按 run 作用域（`execution_id`）分开——同仓并发 run 各自清场，不把兄弟 run 的存活 agent 当孤儿杀（[#2](https://github.com/jeffkit/plaita-nodes/issues/2)） |
 | `llm` | LLM 补全 | **LLM 原子**：单次 chat/completions 生成文本（OpenAI 兼容端点）。与 agentrun 的边界见下 |
 | `decision` | 结构化决策 | **决策原子**：封闭决策空间 → 类型化选择 + 置信度。单条（`input`）或批量（`items`，provider 单次调用逐项判定，适合快照剪枝/批量预筛）。provider 可插拔：`llm` / `jev`（官方 Jev 与自托管 [OpenJev](https://github.com/razorback16/openjev) 同说的 `/v1/systemone` 线协议）/ `jevlike`（本地打分器，`model`=checkpoint 路径，懒加载 torch）/ 自定义注册；低于阈值可标记/走默认项/抛错升级 HITL |
-| `capture` | 命令执行 | 跑本地命令捕获输出；失败不抛错（`exit_code` 返回，流程自行分支） |
-| `gate` | 质量门 | 验证命令语义化为 `passed` 布尔（对标 flowcast runGate）；`max_retries` 失败自动**重跑命令**；超时 kill 进程组返回 `exit_code=124`；输出超阈值（stdout>4000 / stderr>2000）时**头尾保留**并标注 `…[省略 N 字符]…`，尾部失败摘要（`failures:` / `test result:`）不再丢失（[#3](https://github.com/jeffkit/plaita-nodes/issues/3)） |
+| `capture` | 命令执行 | 跑本地命令捕获输出；失败不抛错（`exit_code` 返回，流程自行分支）；子进程 env 按白名单重建（宿主凭据不进子进程），输出超阈值（stdout>4000 / stderr>2000）头尾保留并标注 `…[省略 N 字符]…`（[#5](https://github.com/jeffkit/plaita-nodes/issues/5)） |
+| `gate` | 质量门 | 验证命令语义化为 `passed` 布尔（对标 flowcast runGate）；`max_retries` 失败自动**重跑命令**；超时 kill 进程组返回 `exit_code=124`；输出超阈值（stdout>4000 / stderr>2000）时**头尾保留**并标注 `…[省略 N 字符]…`，尾部失败摘要（`failures:` / `test result:`）不再丢失（[#3](https://github.com/jeffkit/plaita-nodes/issues/3)）；子进程 env 按白名单重建（[#5](https://github.com/jeffkit/plaita-nodes/issues/5)） |
 | `rate_limit` | 频率限制 | 文件计数器按 key 日/周限次（`check`/`record`/`clear`）；`acquire` 原子判定+占坑（flock 互斥），check/record 两步间不会 crash/并发双发 |
 | `report` | 结果通道 | run 级 jsonl 追加/读取（`<repo>/.flowcast/plaita-reports/<token>.jsonl`）：map 子流程与主流程聚合的旁路——绕开内核 map end 递归限制与 if 作用域隔离（workaround，内核侧追踪 [plaita#16](https://github.com/jeffkit/plaita/issues/16)） |
 | `hitl` | 人工确认 | 直连 hitl-server（iLink 微信通道）：发消息 → 进程内轮询回复（**阻塞版**，Normal 模式） |
@@ -111,7 +111,7 @@ JSON 用法示例（agentrun + 模板表达式）：
 
 ## 设计边界
 
-- **安全**：任何日志不打 apiKey / ANTHROPIC_AUTH_TOKEN。
+- **安全**：任何日志不打 apiKey / ANTHROPIC_AUTH_TOKEN。spawn 子进程的节点（`gate` / `capture` / agent 直跑）**不继承宿主全量 env**——经 [plaita#30](https://github.com/jeffkit/plaita/issues/30) 的公共层（`plaita.subprocess_env`）按白名单重建，子进程确实需要的变量由 `capture.env` / agents.json 的 `env` 显式声明；多租户（租户上下文非 `default`）下 agent `repo` 直跑默认拒绝，部署方显式设 `PLAITA_ALLOW_HOST_AGENT_RUN=1` 才放行（[#5](https://github.com/jeffkit/plaita-nodes/issues/5)）。
 - **dry-run**：所有有副作用的节点尊重 `globalContext.dry_run`——agentrun/capture/gate/hitl/hitl_await 与全部连接器（webhook×4 / generic_webhook / api_request / sql_query / email_send）dry 下**不解析凭据、不连网**，返回带 `dry_run` 标记的 fake 结果；writefile 照常写（草稿便于检查）。
 - 新增执行器：在 `agentproc` executor 层扩展 + `config.EXECUTOR_ALIASES` 加映射，本仓节点无需改动。
 
@@ -142,6 +142,7 @@ pytest
 
 ## 变更摘要
 
+- **未发布**（2026-10-08）：spawn 节点不再把宿主全量 env 交给子进程——`gate` / `capture` 改经 plaita 公共层 `build_subprocess_env` 按白名单重建（子进程确实需要的变量走 `capture.env` / agents.json `env` 显式 extra），`recursive_stream_turn` 直跑路径同样收敛；`capture` 输出超阈值（stdout>4000 / stderr>2000）改头尾保留 + `…[省略 N 字符]…` 标注，不再把全量输出带进 checkpoint / 事件流；多租户（租户上下文非 `default`）下 agent `repo` 直跑 fail-closed 到沙箱，部署方显式 `PLAITA_ALLOW_HOST_AGENT_RUN=1` 可放开（[plaita-nodes#5](https://github.com/jeffkit/plaita-nodes/issues/5)，配套 [plaita#30](https://github.com/jeffkit/plaita/issues/30)）。
 - **未发布**（2026-10-06）：`gate` 大输出截断改**头尾保留** + `…[省略 N 字符]…` 标注——stdout>4000 / stderr>2000 时尾部失败摘要（`failures:` / `test result: FAILED`）不再被头部切片丢掉（[plaita-nodes#3](https://github.com/jeffkit/plaita-nodes/issues/3)）；阈值与既有输出字段不变，小输出原文照传、无新增文件。
 - **0.8.0**（2026-09-30）：通知出口收敛——新增 `notify_backends.NOTIFY_BACKENDS` 注册表（先例 `DECISION_PROVIDERS`），协议适配（payload 组装/钉钉加签/SMTP）收进 backend；`webhook`×4 / `email_send` 改薄壳委托（DSL 兼容、输出形状不变，既有连接器测试全绿）；`notify.channel` 可指向任何已注册 backend（新渠道只加 backend 不加节点，[plaita-nodes#1](https://github.com/jeffkit/plaita-nodes/issues/1)）；`notify` 补 dry-run。
 - **0.7.0**（2026-09-30）：修复、契约收口与结构收敛。

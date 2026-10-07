@@ -9,6 +9,9 @@
 stdout/stderr 超阈值（4000 / 2000 字符）时做**头尾保留**并插入
 ``…[省略 N 字符]…`` 标记：诊断（``failures:`` / ``test result:``）几乎总在尾部，
 纯头部切片会把唯一有用的信息丢掉。
+
+子进程 env 经公共层白名单重建（``plaita.subprocess_env``，见
+``_subprocess_env``）：宿主凭据不进被执行的命令。
 """
 from __future__ import annotations
 
@@ -23,16 +26,10 @@ from pydantic import Field
 
 from plaita import Node
 
+from ._subprocess_env import build_subprocess_env, clip_output
+
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
-
-
-def _clip_tail(text: str, cap: int) -> str:
-    """超阈值时头 1/4 + 尾 3/4 保留：诊断（failures:/test result:）在尾部。"""
-    if len(text) <= cap:
-        return text
-    head_len = cap // 4
-    return f"{text[:head_len]}…[省略 {len(text) - cap} 字符]…{text[-(cap - head_len):]}"
 
 
 class GateNode(Node):
@@ -80,7 +77,7 @@ class GateNode(Node):
             return {"passed": True, "gate": self.gate_name, "exit_code": 0,
                     "stdout": "[dry-run]", "stderr": "", "retries": 0, "dry_run": True}
 
-        env = os.environ.copy()
+        env = build_subprocess_env()
         exit_code, stdout, stderr = 1, "", ""
         attempts = 1 + max(0, self.max_retries)
         for attempt in range(attempts):
@@ -103,6 +100,6 @@ class GateNode(Node):
             if exit_code == 0:
                 break
         return {"passed": exit_code == 0, "gate": self.gate_name,
-                "exit_code": exit_code, "stdout": _clip_tail(stdout or "", _STDOUT_CAP),
-                "stderr": _clip_tail(stderr or "", _STDERR_CAP),
+                "exit_code": exit_code, "stdout": clip_output(stdout or "", _STDOUT_CAP),
+                "stderr": clip_output(stderr or "", _STDERR_CAP),
                 "retries": max(0, attempt), "dry_run": False}

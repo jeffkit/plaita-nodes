@@ -10,6 +10,25 @@ from fake_exec import FakeExecution  # noqa: F401  # re-export 兼容
 
 __all__ = ["FakeExecution", "agent_config_repo", "register_test_echo_executor"]
 
+# 部署入口会把改变节点行为的变量注入进程：flow-worker 启动即注入
+# PLAITA_NODES_WORKSPACE_ROOT（plaita#39 的 writefile jail），服务环境还常带
+# LLM_API_BASE/LLM_API_KEY/LLM_MODEL。用例断言的是节点契约而非某个部署档，所以
+# 每个用例前统一抹掉——否则在 worker 进程里跑 pytest（管线门禁就是这么跑的）会
+# 随部署环境红绿。
+_DEPLOYMENT_ENV_VARS = (
+    "PLAITA_NODES_WORKSPACE_ROOT",
+    "LLM_API_BASE",
+    "LLM_API_KEY",
+    "LLM_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def hermetic_deployment_env(monkeypatch):
+    """抹掉宿主注入的部署变量；用例内 monkeypatch.setenv 仍照常生效。"""
+    for key in _DEPLOYMENT_ENV_VARS:
+        monkeypatch.delenv(key, raising=False)
+
 
 @pytest.fixture
 def fake_execution():

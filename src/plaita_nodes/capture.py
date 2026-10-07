@@ -5,6 +5,11 @@
 （如 minimax 封面失败仍入池）。只有配置错误（缺 command）才抛异常。
 
 超时：整组进程 kill（POSIX 用进程组 SIGKILL，对标 flowcast killProcessTree）。
+
+子进程 env 经公共层白名单重建（``plaita.subprocess_env``，见 ``_subprocess_env``）：
+宿主凭据不进被执行的命令。stdout/stderr 超阈值（4000 / 2000 字符）时头尾保留并标注
+``…[省略 N 字符]…``——节点输出会进 checkpoint / 事件流，全量塞进去对低权限
+viewer 也是泄露面。
 """
 from __future__ import annotations
 
@@ -15,6 +20,11 @@ import subprocess
 from typing import Any, ClassVar, Optional
 
 from plaita import Node
+
+from ._subprocess_env import build_subprocess_env, clip_output
+
+_STDOUT_CAP = 4000
+_STDERR_CAP = 2000
 
 
 class CaptureConfigError(RuntimeError):
@@ -28,11 +38,12 @@ class CaptureNode(Node):
     - ``command``: 字符串（shlex 切分）或字符串列表（元素支持 ``{% %}`` 表达式）
     - ``cwd``: 工作目录（默认进程 cwd）
     - ``timeout_secs``: 超时秒数，默认 120；超时 kill 进程组后返回 exit_code=124
-    - ``env``: 附加环境变量（表达式，求值后 dict 合并进 os.environ）
+    - ``env``: 附加环境变量（表达式，求值后叠加到白名单重建的子进程 env 上）
     - ``stdin``: 可选，传给子进程的标准输入文本（表达式；长文本走 stdin 避开 ARG_MAX）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时返回 fake 结果不执行
 
-    输出：``{"ok", "exit_code", "stdout", "stderr", "dry_run"}``。
+    输出：``{"ok", "exit_code", "stdout", "stderr", "dry_run"}``；stdout/stderr
+    超阈值时头尾保留并标注省略量（详见模块 docstring）。
     """
 
     node_type: ClassVar[str] = "capture"
@@ -69,10 +80,12 @@ class CaptureNode(Node):
             return {"ok": True, "exit_code": 0, "stdout": f"[dry-run] would exec: {display}",
                     "stderr": "", "dry_run": True}
 
-        env = os.environ.copy()
+        # 白名单重建 env：宿主凭据不进子进程；``env`` 字段是显式声明的 extra
+        extra_env = {}
         if self.env is not None:
-            extra = execution.evaluate(self.env) or {}
-            env.update({str(k): str(v) for k, v in extra.items()})
+            extra_env = {str(k): str(v)
+                         for k, v in (execution.evaluate(self.env) or {}).items()}
+        env = build_subprocess_env(extra_env)
 
         proc = subprocess.Popen(
             cmd, cwd=str(cwd), env=env, text=True,
@@ -93,4 +106,5 @@ class CaptureNode(Node):
 
         exit_code = 124 if timed_out else (proc.returncode or 0)
         return {"ok": exit_code == 0, "exit_code": exit_code,
-                "stdout": stdout or "", "stderr": stderr or "", "dry_run": False}
+                "stdout": clip_output(stdout or "", _STDOUT_CAP),
+                "stderr": clip_output(stderr or "", _STDERR_CAP), "dry_run": False}
