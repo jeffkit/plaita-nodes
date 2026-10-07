@@ -172,7 +172,11 @@ class GateNode(Node):
         from . import sandbox as sb
 
         ws_key = str(execution.evaluate(self.ws_key) or "main").strip()
-        execution_id = str(getattr(execution, "execution_id", "") or "")
+        # 身份用**根执行** id（不是本节点所在 childflow 的上下文 id）：gate 多在
+        # gate_once 子流程里跑，用子流程 id 会 ensure() 不到 agent 的实例而新建
+        # 空沙箱——门禁就在空目录里跑成 changed_files=0 / "no tests ran"（2026-10-07
+        # 实测 9 次全灭的根因）。
+        execution_id = sb.root_execution_id(execution)
         if not execution_id:
             raise ValueError("gate 沙箱执行缺 execution_id（无法定位实例）")
         spec = sb.load_sandboxes().get(sandbox_name)

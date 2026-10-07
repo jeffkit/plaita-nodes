@@ -115,7 +115,10 @@ class SandboxAgentNode(AgentRunNode):
 
         sandbox_name = str(execution.evaluate(self.sandbox) or "ags").strip()
         ws_key = str(execution.evaluate(self.ws_key) or "main").strip()
-        execution_id = str(getattr(execution, "execution_id", "") or "")
+        # 身份用**根执行** id：childflow 上下文每次新铸 $EXECUTION_ID，直接取
+        # execution.execution_id 会让子流程里的节点另建空实例（见 sandbox.
+        # root_execution_id 的说明）。
+        execution_id = sb.root_execution_id(execution)
         if not execution_id:
             raise AgentRunError("execution 缺少 execution_id，无法派生沙箱实例身份")
 

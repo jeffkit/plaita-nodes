@@ -89,6 +89,29 @@ def handle_id(execution_id: str, ws_key: str) -> str:
     return f"{execution_id}:{ws_key}"
 
 
+def root_execution_id(execution: Any) -> str:
+    """沙箱实例身份必须取**根执行**的 execution_id（沿 parent 链上溯）。
+
+    引擎语义：``ExecutionContext`` 每次构造（含 ``child()``）都新铸
+    ``$EXECUTION_ID``（plaita core/context.py）。因此 childflow 里的节点
+    ``execution.execution_id`` 与主流程**不同**——用它派生
+    ``(execution_id, ws_key)`` 会让子流程节点 ``ensure()`` 找不到主流程已建的
+    实例，转而**新建一个空实例**（2026-10-07 实测：门禁在空工作区里跑，
+    ``changed_files=0`` / "no tests ran"，且每调用泄漏一个沙箱）。
+
+    同一 flow 内「多次 Agent 执行共用同一沙箱」的前提就是身份对整个 flow 稳定，
+    故一律以根执行 id 为准。上溯链条对 ``FlowExecution`` 与 ``ExecutionContext``
+    同型（两者都有 ``parent`` / ``execution_id``）。
+    """
+    cur = execution
+    for _ in range(64):  # parent 链环保护
+        parent = getattr(cur, "parent", None)
+        if parent is None:
+            break
+        cur = parent
+    return str(getattr(cur, "execution_id", "") or "")
+
+
 def resource_name(execution_id: str, ws_key: str, kind: str) -> str:
     """确定性派生 docker 资源名（volume / container），同 key 必同名。"""
     suffix = sanitize_ws_key(f"{execution_id}-{ws_key}")[:180]

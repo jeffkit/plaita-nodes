@@ -251,3 +251,31 @@ def test_sandbox_agent_node_validate_and_dry():
 
     with pytest.raises(Exception):
         SandboxAgentNode(id="n2", repo="/tmp/wt").validate()   # 缺 prompt
+
+
+# ── 实例身份：子流程上下文必须上溯到根执行 ─────────────────────────────
+
+def test_root_execution_id_walks_up_to_root():
+    """真实引擎：childflow 上下文会新铸 ``$EXECUTION_ID``（差异真实存在），
+    而沙箱身份 ``(execution_id, ws_key)`` 一律取**根执行** id——否则子流程里的
+    ``ensure()`` 找不到 agent 已建的实例，转而新建空沙箱（2026-10-07 实测根因：
+    gate_once 里的门禁在空工作区跑成 ``changed_files=0`` / "no tests ran"，
+    且每调用泄漏一个实例）。"""
+    pytest.importorskip("plaita", reason="plaita 引擎不可导入时跳过（本包测试可独立跑）")
+    from plaita.core.executor import FlowExecution
+
+    root = FlowExecution()
+    root.clean()
+    child = root.get_child_execution()
+
+    assert child.execution_id != root.execution_id      # 子上下文确实另铸
+    assert sb.root_execution_id(child) == root.execution_id
+    assert sb.root_execution_id(root) == root.execution_id
+
+
+def test_root_execution_id_without_parent_and_without_id():
+    class _Stub:
+        execution_id = "solo"
+
+    assert sb.root_execution_id(_Stub()) == "solo"      # 无 parent = 自己是根
+    assert sb.root_execution_id(object()) == ""          # 无 id → 空串（调用方 fail-closed）
