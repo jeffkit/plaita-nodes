@@ -545,6 +545,11 @@ def wrap_agent_argv_from_env(env: Dict[str, str], agent_argv: list) -> list:
     if driver == "ssh":
         from .sandbox_ssh import wrap_argv_from_env
         return wrap_argv_from_env(env, agent_argv)
+    if driver == "ags":
+        # AGS（腾讯云）：远程执行——包装产出代理 argv（本地 spawn、数据面转发
+        # 远端沙箱执行），见 sandbox_ags
+        from .sandbox_ags import wrap_argv_from_env
+        return wrap_argv_from_env(env, agent_argv)
     raise SandboxConfigError(f"driver '{driver}' 没有 env 包装实现，拒绝裸跑 agent argv")
 
 
