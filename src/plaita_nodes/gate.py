@@ -87,14 +87,19 @@ class GateNode(Node):
         # timeout_secs 经 DSL 传入时是表达式串（issue-pipeline v0.3 起 per-repo
         # 门预算走 INPUT），必须求值——与 git_publish.merge_mode 同一批坑。
         timeout_secs = int(execution.evaluate(self.timeout_secs) or 600)
+        # sandbox 同样可能是表达式串（如 childflow 里传 `$INPUT.sbx_spec`）：
+        # **必须求值后再判分支**——用原始字段判会因"非 None"恒真而误入沙箱，
+        # 或在未求值态传入 driver（实测：sandbox='$INPUT.sbx_spec' 字符串直入）
+        sandbox_spec = (str(execution.evaluate(self.sandbox) or "").strip()
+                        if self.sandbox is not None else "")
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
         if dry:
             return {"passed": True, "gate": self.gate_name, "exit_code": 0,
                     "stdout": "[dry-run]", "stderr": "", "retries": 0, "dry_run": True}
 
-        # 沙箱分支：填了 sandbox 即在沙箱内执行（同实例、同工作区、代理通道）
-        if self.sandbox is not None:
-            return self._execute_in_sandbox(execution, cmd, timeout_secs)
+        # 沙箱分支：sandbox 求值非空即在沙箱内执行（同实例、同工作区、代理通道）
+        if sandbox_spec:
+            return self._execute_in_sandbox(execution, cmd, timeout_secs, sandbox_spec)
 
         env = os.environ.copy()
         exit_code, stdout, stderr = 1, "", ""
@@ -153,7 +158,8 @@ class GateNode(Node):
             out.append(remote)
         return out, injected
 
-    def _execute_in_sandbox(self, execution: Any, cmd: list, timeout_secs: int) -> dict:
+    def _execute_in_sandbox(self, execution: Any, cmd: list, timeout_secs: int,
+                            sandbox_name: str = "") -> dict:
         """在沙箱内执行门禁命令（复用 SANDBOX_AGENT 的实例与工作区）。
 
         为什么值得：门禁（pytest/cargo/clippy）是流水线最重的部分——宿主执行
@@ -165,7 +171,6 @@ class GateNode(Node):
         """
         from . import sandbox as sb
 
-        sandbox_name = str(execution.evaluate(self.sandbox) or "").strip()
         ws_key = str(execution.evaluate(self.ws_key) or "main").strip()
         execution_id = str(getattr(execution, "execution_id", "") or "")
         if not execution_id:
