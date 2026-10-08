@@ -157,8 +157,9 @@ class SandboxAgentNode(AgentRunNode):
         redactor = sb.Redactor(env_whitelist)
 
         handle = driver.ensure(spec, execution_id, ws_key)
-        # 续期：实例寿命 ≥ 本轮预算（长 flow 中段 attach 回来仍可用）
-        driver.client.set_timeout(handle.id, max(wall_secs * 2, 3600))
+        # 续期：本轮预算 + 收尾余量（见 sandbox.renewal_timeout_secs 的长注释）——
+        # 不是固定 4h；空闲长尾靠显式释放，不靠 TTL 兜长。
+        driver.client.set_timeout(handle.id, sb.renewal_timeout_secs(wall_secs))
 
         if repo:
             # 首次：把宿主工作区供给到沙箱（幂等；之后轮次跳过）

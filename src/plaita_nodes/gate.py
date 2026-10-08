@@ -187,6 +187,15 @@ class GateNode(Node):
             raise ValueError(f"gate 沙箱 driver '{spec.driver}' 未注册")
 
         handle = driver.ensure(spec, execution_id, ws_key)   # 幂等 attach 同一实例
+        # 续期：本门预算 + 10 分钟余量。谁用实例谁续期——否则实例寿命只由上一次
+        # agent 调用决定，长门禁（cargo 类，预算可到 30min+）可能跑到一半被 TTL 收走。
+        # 空闲长尾由「终态/挂起显式释放」负责，不靠 TTL 兜长。
+        try:
+            driver.client.set_timeout(
+                handle.id, sb.renewal_timeout_secs(timeout_secs, slack_secs=600,
+                                                   floor_secs=900))
+        except Exception as exc:  # noqa: BLE001 — 续期失败不拦门禁（TTL 兜底）
+            _log.warning("gate: 沙箱续期失败（忽略）：%s", exc)
         cwd = str(execution.evaluate(self.cwd) or handle.path or "")
         envs = {str(k): str(v) for k, v in (spec.env or {}).items()}
 

@@ -152,6 +152,9 @@ def test_gate_sandbox_branch_dispatches_to_driver(monkeypatch, tmp_path):
             calls["timeout"] = kw.get("timeout")
             return 0, "all good\n", ""
 
+        def set_timeout(self, instance, secs):
+            calls["renewal"] = (instance, secs)
+
     class _FakeDriver:
         client = _FakeClient()
         def ensure(self, spec, execution_id, ws_key):
@@ -175,6 +178,8 @@ def test_gate_sandbox_branch_dispatches_to_driver(monkeypatch, tmp_path):
     assert calls["ensure"] == ("ags", "exec-42", "main")     # 与 agent 同实例键
     assert calls["cwd"] == "/home/user/plaita-ws/repo"
     assert "pytest" in " ".join(calls["argv"])
+    # 门禁自带续期（谁用谁续）：本门预算 600s → max(600+600, 900) = 1200s
+    assert calls["renewal"] == ("inst-9", 1200)
 
 
 def test_gate_sandbox_unregistered_fails_closed(monkeypatch):
