@@ -89,6 +89,21 @@ def handle_id(execution_id: str, ws_key: str) -> str:
     return f"{execution_id}:{ws_key}"
 
 
+def renewal_timeout_secs(budget_secs: int, slack_secs: int = 900,
+                         floor_secs: int = 1800) -> int:
+    """沙箱实例续期时长 = **本次用量预算 + 收尾余量**（下限 ``floor_secs``）。
+
+    为什么不是固定长寿命（旧式 ``max(budget*2, 3600)``）：流程正常结束时终态/挂起
+    都会**显式释放**实例（flow_worker._release_sandboxes），TTL 只剩「崩溃兜底」
+    一个作用——固定 4 小时会把一次崩溃的长尾放大成"跑完还挂几小时"。2026-10-08
+    首夜实测：**~80% 沙箱花费是未释放闲置**（单实例 ¥0.4716/时）。
+
+    「谁用实例谁续期」：agent 按自己的 wall 预算续，门禁按自己的门预算续，
+    长 flow 靠每次调用续命，不会被 TTL 收走；无人续期的空闲实例 10 分钟内自然回收。
+    """
+    return max(int(budget_secs) + int(slack_secs), int(floor_secs))
+
+
 def root_execution_id(execution: Any) -> str:
     """沙箱实例身份必须取**根执行**的 execution_id（沿 parent 链上溯）。
 

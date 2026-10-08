@@ -303,6 +303,20 @@ def test_root_execution_id_walks_up_to_root():
     assert sb.root_execution_id(root) == root.execution_id
 
 
+def test_renewal_timeout_is_budget_plus_slack_not_fixed_long_life():
+    """续期 = 本次预算 + 余量（下限兜底），不是固定长寿命。
+
+    2026-10-08 首夜实测 ~80% 沙箱花费是「跑完没释放」的闲置：旧式
+    ``max(budget*2, 3600)`` 在 impl（7200s 预算）上把实例续成 **4 小时**；
+    终态/挂起已能显式释放后，TTL 只该在崩溃兜底时兑现，故收紧为
+    budget + slack。
+    """
+    assert sb.renewal_timeout_secs(7200) == 8100          # impl：2h 预算 → 2h15m
+    assert sb.renewal_timeout_secs(600) == 1800           # 短预算吃下限
+    assert sb.renewal_timeout_secs(60, slack_secs=600, floor_secs=900) == 900
+    assert sb.renewal_timeout_secs(7200) < 4 * 3600       # 明显短于旧行为的 4h
+
+
 def test_root_execution_id_without_parent_and_without_id():
     class _Stub:
         execution_id = "solo"
