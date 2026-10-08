@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as _dt
 import hashlib
 import logging
 import os
@@ -303,6 +304,43 @@ class AgsDriver:
         """最终击杀权：实例级 kill（取消/失败路径）。"""
         self.client.kill(handle.id)
 
+    # ── 暂停实例清扫（pause 保现场的安全带）──────────────────────────────
+
+    def sweep_paused(self, max_age_secs: int = 6 * 3600) -> list:
+        """回收**超龄仍在 PAUSED** 的自家实例，返回被清 id 列表。
+
+        为什么需要：失败/取消路径改为一律 pause 保现场后（sandbox_agent.
+        _preserve_scene），没人续跑的暂停实例会累积并占实例配额（AGS 配额 ~20）。
+        暂停期间不计计算力费，但配额占满会让新建失败。**只清带自家 metadata 键
+        （plaita_execution / plaita_ws）的实例**，同账号下他人的实例绝不碰。
+        """
+        try:
+            from e2b_code_interpreter import Sandbox, SandboxQuery, SandboxState
+        except Exception as exc:  # pragma: no cover — 缺 e2b 时静默跳过
+            _log.warning("ags: 暂停清扫跳过（e2b 不可用）：%s", exc)
+            return []
+        try:
+            items = Sandbox.list(SandboxQuery(state=[SandboxState.PAUSED])).next_items()
+        except Exception as exc:  # noqa: BLE001 — 枚举失败不致命
+            _log.warning("ags: 暂停实例枚举失败：%s", exc)
+            return []
+        now = _dt.datetime.now(_dt.timezone.utc)
+        killed: list = []
+        for entry in items:
+            sid = str(getattr(entry, "sandbox_id", "") or "")
+            started = getattr(entry, "started_at", None)
+            if not should_sweep_paused(getattr(entry, "metadata", None), started,
+                                       now=now, max_age_secs=max_age_secs):
+                continue
+            try:
+                self.client.kill(sid)
+                killed.append(sid)
+                _log.info("ags: 清扫超龄暂停实例 %s（存活 %.1fh）", sid[:14],
+                          (now - started).total_seconds() / 3600)
+            except Exception as exc:  # noqa: BLE001 — 单点失败不拖累其它
+                _log.warning("ags: 清扫暂停实例 %s 失败：%s", sid[:14], exc)
+        return killed
+
     def release(self, handle: WorkspaceHandle, keep_data: bool = True,
                 spec: Optional[WorkspaceSpec] = None) -> None:
         """释放计算层。**keep_data=True → pause（保实例磁盘，可恢复）；False → kill**。
@@ -449,6 +487,25 @@ def _proxy_argv(instance_id: str, envfile: str, cwd: str, timeout_secs: int) -> 
 # 「ags_exec: 缺少 E2B_DOMAIN / E2B_API_KEY」（2026-10-08 远端实测 245 次，
 # 整条沙箱流程空转）。密钥面：只进代理子进程，不进沙箱容器（容器 env 走 envfile）。
 AGS_CREDENTIAL_ENV = ("E2B_DOMAIN", "E2B_API_KEY")
+
+
+def should_sweep_paused(metadata: Optional[Dict[str, Any]], started_at: Any, *,
+                        now: _dt.datetime, max_age_secs: int) -> bool:
+    """纯决策：这条**暂停**实例该不该清（决策表测试专用，不碰网络）。
+
+    ① 必须带自家 metadata 键（``plaita_execution`` / ``plaita_ws``）——同账号下
+       他人的实例绝不碰；
+    ② 必须能取到 ``started_at`` 且存活 ≥ ``max_age_secs``——刚暂停的实例可能马上
+       被续跑 attach 回来（重投接力），不动。
+    """
+    md = metadata or {}
+    if not (md.get(META_EXECUTION) or md.get(META_WS)):
+        return False
+    if started_at is None:
+        return False
+    if getattr(started_at, "tzinfo", None) is None:   # 容错：裸 datetime 按 UTC 读
+        started_at = started_at.replace(tzinfo=_dt.timezone.utc)
+    return (now - started_at).total_seconds() >= max_age_secs
 
 
 def wrap_argv_from_env(env: Dict[str, str], agent_argv: list) -> list:

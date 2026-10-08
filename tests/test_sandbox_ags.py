@@ -303,6 +303,61 @@ def test_root_execution_id_walks_up_to_root():
     assert sb.root_execution_id(root) == root.execution_id
 
 
+def test_should_sweep_paused_decision_table():
+    """暂停清扫决策：只清「自家 metadata + 超龄」的实例（配额安全带）。
+
+    背景：失败/取消路径改为一律 pause 保现场后，没人续跑的暂停实例会累积占配额
+    （AGS ~20）。暂停不计计算力费，但配额满会让新建失败，所以要有这条清扫。
+    """
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 8, 12, 0, tzinfo=dt.timezone.utc)
+    old = now - dt.timedelta(hours=7)
+    young = now - dt.timedelta(minutes=5)
+    mine = {sa.META_EXECUTION: "e1", sa.META_WS: "main"}
+
+    assert sa.should_sweep_paused(mine, old, now=now, max_age_secs=6 * 3600) is True
+    assert sa.should_sweep_paused(mine, young, now=now, max_age_secs=6 * 3600) is False
+    assert sa.should_sweep_paused({"other": "x"}, old, now=now, max_age_secs=0) is False
+    assert sa.should_sweep_paused(None, old, now=now, max_age_secs=0) is False
+    assert sa.should_sweep_paused(mine, None, now=now, max_age_secs=0) is False
+    naive = (now - dt.timedelta(hours=7)).replace(tzinfo=None)   # 裸 datetime 容错
+    assert sa.should_sweep_paused(mine, naive, now=now, max_age_secs=6 * 3600) is True
+
+
+def test_sweep_paused_kills_only_own_stale(monkeypatch):
+    """sweep_paused 端到端（假 e2b 模块）：只 kill 自家超龄暂停实例。"""
+    import datetime as dt
+    import sys
+    import types
+
+    now = dt.datetime.now(dt.timezone.utc)
+    entries = [
+        types.SimpleNamespace(sandbox_id="mine-old", metadata={sa.META_EXECUTION: "e1"},
+                              started_at=now - dt.timedelta(hours=7)),
+        types.SimpleNamespace(sandbox_id="mine-new", metadata={sa.META_WS: "main"},
+                              started_at=now - dt.timedelta(minutes=3)),
+        types.SimpleNamespace(sandbox_id="theirs", metadata={"someone": "else"},
+                              started_at=now - dt.timedelta(days=2)),
+    ]
+
+    class _FakePaginator:
+        def next_items(self):
+            return entries
+
+    fake = types.ModuleType("e2b_code_interpreter")
+    fake.Sandbox = types.SimpleNamespace(list=lambda q=None: _FakePaginator())
+    fake.SandboxQuery = lambda **kw: kw
+    fake.SandboxState = types.SimpleNamespace(PAUSED="paused", RUNNING="running")
+    monkeypatch.setitem(sys.modules, "e2b_code_interpreter", fake)
+
+    client = FakeClient()
+    driver = sa.AgsDriver(client=client)
+    killed = driver.sweep_paused(max_age_secs=6 * 3600)
+    assert killed == ["mine-old"]
+    assert [c for c in client.calls if c[0] == "kill"] == [("kill", "mine-old")]
+
+
 def test_renewal_timeout_is_budget_plus_slack_not_fixed_long_life():
     """续期 = 本次预算 + 余量（下限兜底），不是固定长寿命。
 
