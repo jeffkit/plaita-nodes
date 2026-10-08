@@ -48,6 +48,7 @@ class SandboxLifecycleCallback(FlowCallback):
         self._redactor = redactor
         self._keep_data = keep_data
         self._snapshots: Dict[str, Dict[str, Any]] = {}   # id → 快照
+        self._released: set = set()                       # 幂等：已释放过的 id
         self.events: List[Dict[str, Any]] = []
 
     # ── FlowCallback 钩子 ───────────────────────────────────────────────
@@ -65,32 +66,62 @@ class SandboxLifecycleCallback(FlowCallback):
         self._drain("end")
 
     # ── 释放逻辑 ────────────────────────────────────────────────────────
-    def _drain(self, phase: str) -> None:
-        for sid in list(self._snapshots):
-            snap = self._snapshots.pop(sid)
+    def drain(self, snapshots: Optional[List[Dict[str, Any]]] = None,
+              phase: str = "end",
+              keep_data: Optional[bool] = None) -> List[Dict[str, Any]]:
+        """释放给定快照（缺省=本进程累积的那批），返回逐条结果。
+
+        宿主可从**持久化上下文**收集快照后调用（``collect_workspace_snapshots``）：
+        分布式步进下 agent 节点跑在**早先的 step**，而每一步都会新建 handlers 列表
+        ——进程内累积到 flow 结束那一步往往是空的，只有上下文里的
+        ``$NODE.*.workspace`` 跨 step/跨进程权威（2026-10-08 实测：plaita#22 跑完
+        24 分钟后实例仍 running，就是只靠进程内快照的后果）。
+
+        ``keep_data``：None=用实例缺省；False=kill（成功路径不留现场）；
+        True=pause（失败/取消路径保现场可恢复）。**幂等**：同一 id 只释放一次
+        （终态钩子与 ``on_flow_end`` 可能各调一次，重复释放会再 kill 已死实例）。
+        """
+        targets = ([self._snapshots[k] for k in list(self._snapshots)]
+                   if snapshots is None else list(snapshots))
+        self._snapshots.clear()
+        results: List[Dict[str, Any]] = []
+        for snap in targets:
+            sid = str((snap or {}).get("id") or "")
+            if sid and sid in self._released:
+                continue
             try:
-                outcome = self._release_one(snap)
+                outcome = self._release_one(snap, keep_data=keep_data)
             except Exception as exc:  # best-effort：单点失败不拖累其它 workspace
                 outcome = f"error: {exc}"
+            if sid:
+                self._released.add(sid)
             self.events.append({"phase": phase, "id": sid, "outcome": outcome})
             logger.info("sandbox lifecycle phase=%s id=%s -> %s", phase, sid, outcome)
+            results.append({"id": sid, "outcome": outcome})
+        return results
 
-    def _release_one(self, snap: Dict[str, Any]) -> str:
+    def _drain(self, phase: str) -> None:
+        self.drain(phase=phase)
+
+    def _release_one(self, snap: Dict[str, Any],
+                     keep_data: Optional[bool] = None) -> str:
         exec_id, _, ws_key = str(snap["id"]).partition(":")
         specs = self._sandboxes
         if specs is None:
             specs = sb.load_sandboxes(repo=self._repo)
         spec = specs.get(ws_key) or specs.get(str(snap.get("ws_key", "")))
         if spec is None:
-            return self._release_by_handle(snap)
+            return self._release_by_handle(snap, keep_data=keep_data)
         driver = self._drivers.get(spec.driver) or sb.get_driver(spec.driver)
         if driver is None:
             return f"no-driver:{spec.driver}"
         handle = driver.ensure(spec, exec_id, ws_key)  # 幂等 attach / 按名重建
-        return sb.suspend_release(driver, handle, spec, redactor=self._redactor,
-                                  keep_data=self._keep_data)
+        return sb.suspend_release(
+            driver, handle, spec, redactor=self._redactor,
+            keep_data=self._keep_data if keep_data is None else keep_data)
 
-    def _release_by_handle(self, snap: Dict[str, Any]) -> str:
+    def _release_by_handle(self, snap: Dict[str, Any],
+                           keep_data: Optional[bool] = None) -> str:
         """回退路径：直接用快照里的 driver + id 释放（不做 spec 反查）。
 
         为什么需要：**remote-API 型 driver（AGS）的反查不成立**——这类部署全流程
@@ -112,7 +143,8 @@ class SandboxLifecycleCallback(FlowCallback):
                 driver=name, id=sid, path=str(snap.get("path") or ""),
                 ws_key=str(snap.get("ws_key") or ""),
                 execution_id=str(sid).partition(":")[0])
-            driver.release(handle, keep_data=self._keep_data)
+            driver.release(
+                handle, keep_data=self._keep_data if keep_data is None else keep_data)
             return f"released-by-handle({name})"
         except Exception as exc:  # noqa: BLE001 — 尽力而为，AGS timeout 兜底
             return f"handle-release-error: {exc}"
