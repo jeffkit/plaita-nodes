@@ -57,6 +57,36 @@ class TestLifecycleCallback:
         assert cb.events[0]["outcome"] == "clean"
         assert driver.calls[-1] == ("release", handle_id("e1", "main"), True)
 
+    # ── drain：从持久化上下文释放（终态路径，2026-10-08）──────────────────
+
+    def test_drain_with_context_snapshots_kills_on_success(self):
+        """终态成功路径：快照来自**持久化上下文**（进程内可能已空），
+        keep_data=False → kill 不留现场。"""
+        driver = RecordingDriver()
+        cb = SandboxLifecycleCallback(sandboxes={"main": SPEC}, drivers={"recording": driver})
+        out = cb.drain([_snapshot()], phase="terminal", keep_data=False)
+        assert out == [{"id": handle_id("e1", "main"), "outcome": "clean"}]
+        assert driver.calls[-1] == ("release", handle_id("e1", "main"), False)
+        assert cb.events[0]["phase"] == "terminal"
+
+    def test_drain_is_idempotent_per_instance(self):
+        """同 id 只释放一次：终态钩子与 on_flow_end 可能各调一次，
+        重复释放会对已死实例再 kill（AGS 上报错且白跑一趟往返）。"""
+        driver = RecordingDriver()
+        cb = SandboxLifecycleCallback(sandboxes={"main": SPEC}, drivers={"recording": driver})
+        cb.drain([_snapshot()], phase="terminal", keep_data=False)
+        calls = len(driver.calls)
+        assert cb.drain([_snapshot()], phase="terminal", keep_data=False) == []
+        assert len(driver.calls) == calls
+
+    def test_drain_defaults_accumulated_and_instance_keep_data(self):
+        """snapshots 缺省=进程内累积；keep_data 缺省=实例设置（pause 保现场）。"""
+        driver = RecordingDriver()
+        cb = SandboxLifecycleCallback(sandboxes={"main": SPEC}, drivers={"recording": driver})
+        cb.on_node_end(flow=None, node=None, result={"workspace": _snapshot()})
+        cb.drain(phase="terminal")
+        assert driver.calls[-1] == ("release", handle_id("e1", "main"), True)
+
     def test_unregistered_spec_falls_back_to_handle_release(self):
         """注册表反查失败时**按 handle 直接释放**（2026-10-07 修正）。
 
