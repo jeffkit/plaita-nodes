@@ -438,6 +438,21 @@ class AgentRunNode(Node):
             {"executor": ap_executor},
             RunOptions(message=str(prompt), session_id=session_id,
                        extra_env=extra_env,
+                       # ★ cwd=repo：**必须显式传**，否则 agent 继承【调度进程的 cwd】
+                       # 而非目标仓（2026-10-11 端到端实测发现）。
+                       #
+                       # 危害：agent 在错误目录里干活 —— 它会读错仓的代码、把改动
+                       # 写到别处，而 `has_changes` 查的是 worktree ⇒ 判「agent
+                       # made no changes」⇒ **任务被静默丢弃**（不报错）。
+                       # 实测：impl_agent=cursor-sonnet46 的 run，cursor 会话
+                       # meta.json 记录 `cwd=/Users/kong/projects/infra4agent/issue-keeper`
+                       # （= 我发起 bridge 的目录），而目标仓是 /tmp/e2e-repo。
+                       #
+                       # 对照：同文件 recursive **直调**路径（:703）一直有 `cwd=workspace`
+                       # ⇒ 这才是正确形态；agentproc 路径遗漏了。
+                       # 影响面：全部 14 个 agentproc executor（cursor/claude-code/
+                       # codex/deepseek/…），非仅 cursor。
+                       cwd=str(repo) if repo else None,
                        run_lock_key=run_lock_key,
                        timeout_secs=int(execution.evaluate(self.timeout_secs) or 1800),
                        # 协作式取消（2026-10 波次③步内中断）：worker 取消监听命中
