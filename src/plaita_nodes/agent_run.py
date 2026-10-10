@@ -42,6 +42,28 @@ class AgentRunError(RuntimeError):
     pass
 
 
+#: 宿主锁定型 executor：用宿主机器上的 CLI 二进制 + 本机登录态，不接受外部
+#: provider 端点。这些 executor **不能在 workspace 沙箱内执行**（见
+#: `_execute_sandboxed` 的 fail-closed 说明）。
+#:
+#: 判定口径与 config.py 的 `_MODEL_ONLY_TRANSLATORS` 对齐：该表列出的即
+#: 「model 直接进 env、不需要 provider bundle」的执行器（当前只有 cursor）。
+#: 新增此类 executor 时**两处都要登记**——这里决定「能否进沙箱」，那边决定
+#: 「model 怎么进 env」。若两边不一致，会出现「沙箱里静默跑默认模型」这类
+#: 难查的降级（2026-10-11 评审发现）。
+_HOST_LOCKED_EXECUTORS = frozenset({"cursor"})
+
+
+def _host_locked_executors() -> frozenset:
+    """宿主锁定型 executor 名集合（可经 env 覆盖用于测试/灰度）。"""
+    import os as _os
+
+    raw = (_os.environ.get("PLAITA_HOST_LOCKED_EXECUTORS") or "").strip()
+    if raw:
+        return frozenset(x.strip() for x in raw.split(",") if x.strip())
+    return _HOST_LOCKED_EXECUTORS
+
+
 def _ap_exit_cancelled() -> int:
     """agentproc 的 EXIT_CANCELLED（125）。agentproc 缺席时回退字面量——本常
     量在运行器契约层固定，直跑与沙箱两条路径共用。"""
@@ -539,6 +561,26 @@ class AgentRunNode(Node):
                 f"执行器 '{executor}' 未接入（agentproc 可用：{sorted(AP_EXECUTORS)}）；"
                 f"如需其他 CLI 请在 agentproc executor 层扩展或加 EXECUTOR_ALIASES 映射"
             )
+        # ── fail-closed：宿主锁定型 CLI 不进沙箱（2026-10-11，评审发现）──
+        # 「锁定型」= 用**宿主机器上的 CLI 二进制 + 本机登录态**，不接受外部
+        # provider 端点（见 config.py `_MODEL_ONLY_TRANSLATORS` 的 cursor）。
+        # 这类 executor 进沙箱必失败，且失败形态是**误导性的**：
+        #   ① 容器里根本没装该 CLI ⇒ `command not found`（跑到容器才报，
+        #      此时 preflight 建 worktree + setup_command 已烧掉几十分钟）；
+        #   ② 即便装了，也没有宿主登录态（凭据在宿主 keychain/配置里）；
+        #   ③ 更隐蔽：沙箱分支的 env 白名单只透传 `RECURSIVE_MODEL`/
+        #      `RECURSIVE_MAX_STEPS`（见下方 for knob），**CURSOR_MODEL 被丢弃**
+        #      ⇒ 即使前两条都通了，模型选择会**静默退回 CLI 默认**。
+        # 故在此显式拒绝，把「静默错跑」变成「响亮失败」。
+        _host_locked = _host_locked_executors()
+        if ap_executor in _host_locked:
+            raise AgentConfigError(
+                f"executor '{ap_executor}' 是宿主锁定型 CLI（依赖宿主二进制与"
+                f"登录态），不能在 workspace 沙箱内执行——请为该 agent 段改用"
+                f"沙箱可承载的 executor（如 recursive），或把该段移出沙箱路径。"
+                f"（当前 profile: {agent_name}）"
+            )
+
         sandbox_executor = sb.register_sandbox_executor(ap_executor)
 
         from agentproc.runner import RunOptions
