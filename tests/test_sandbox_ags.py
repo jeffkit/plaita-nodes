@@ -415,3 +415,28 @@ def test_root_execution_id_without_parent_and_without_id():
 
     assert sb.root_execution_id(_Stub()) == "solo"      # 无 parent = 自己是根
     assert sb.root_execution_id(object()) == ""          # 无 id → 空串（调用方 fail-closed）
+
+
+def test_host_locked_executor_refused_in_sandbox():
+    """宿主锁定型 CLI（cursor）必须被沙箱路径 fail-closed 拒绝。
+
+    2026-10-11 评审发现：cursor 是「宿主 CLI + 本机登录态」，进沙箱必失败，
+    且失败形态误导（容器没装 → command not found；或装了但无登录态；或
+    沙箱 env 白名单丢 `CURSOR_MODEL` → 静默退回默认模型）。
+    显式拒绝把「静默错跑」变成「响亮失败」。
+    """
+    from plaita_nodes.agent_run import _host_locked_executors
+
+    locked = _host_locked_executors()
+    assert "cursor" in locked, "cursor 必须被登记为宿主锁定型（进沙箱应拒绝）"
+    # 沙箱可承载的 executor 不能误伤
+    for ok in ("recursive", "claude-code", "codex"):
+        assert ok not in locked, f"{ok} 不应被误列为宿主锁定型"
+
+
+def test_host_locked_executors_env_override(monkeypatch):
+    """env 可覆盖集合（测试/灰度用）。"""
+    from plaita_nodes.agent_run import _host_locked_executors
+
+    monkeypatch.setenv("PLAITA_HOST_LOCKED_EXECUTORS", "cursor,foo")
+    assert _host_locked_executors() == frozenset({"cursor", "foo"})
