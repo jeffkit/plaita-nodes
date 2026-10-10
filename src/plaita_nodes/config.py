@@ -128,48 +128,7 @@ def _claude_env(bundle: Dict[str, Any], model: Optional[str]) -> Dict[str, str]:
     return env
 
 
-def _cursor_env(bundle: Dict[str, Any], model: Optional[str]) -> Dict[str, str]:
-    """cursor-agent（= agentproc 的 ``cursor`` executor）的模型/端点翻译。
-
-    **为什么需要**（2026-10-10）：cursor executor 的 ``build_args`` 读的是
-    **环境变量** ``CURSOR_MODEL``（见 agentproc ``_make_cursor_handlers``），
-    而 ``resolve_agent`` 的通用路径只把 model 放进返回值的 ``model`` 字段——
-    该字段**不会**传给执行器。缺这个翻译时，``agents.json`` 里写的
-    ``"model": "claude-4.6-sonnet-medium"`` 会被静默忽略、实际走 cursor 的
-    默认模型（**配置写了不生效**，本仓已多次踩同类「死旋钮」）。
-
-    cursor 是**锁定型 CLI**（用本机 cursor-agent 账号登录态，见
-    ``cursor-agent status``），不接受外部 provider 的 apiBase/apiKey；
-    故这里只翻译模型名。若 bundle 带了端点/密钥，一并透传 env 供
-    ``CURSOR_API_ENDPOINT`` / ``CURSOR_API_KEY`` 覆盖（可选）。
-    """
-    env: Dict[str, str] = {}
-    resolved_model = model or bundle.get("model")
-    if resolved_model:
-        env["CURSOR_MODEL"] = str(resolved_model)
-    # 端点/密钥可选：cursor 默认用本机登录态；显式配置时允许覆盖。
-    if bundle.get("apiBase"):
-        env["CURSOR_API_ENDPOINT"] = str(bundle["apiBase"])
-    if bundle.get("apiKey"):
-        env["CURSOR_API_KEY"] = str(bundle["apiKey"])
-    return env
-
-
-_ENV_TRANSLATORS = {
-    "recursive": _recursive_env,
-    "claude": _claude_env,
-    "cursor": _cursor_env,
-}
-
-# 无 provider 时也需把 model 翻译成 env 的执行器（**锁定型 CLI**：用本机
-# 登录态，不接外部 provider）。签名 (model) -> env，与 _ENV_TRANSLATORS 的
-# (bundle, model) 不同，故单列一表——混用会让 recursive/claude 收到空 bundle
-# 而 KeyError（2026-10-10 实测）。
-_MODEL_ONLY_TRANSLATORS = {
-    "cursor": lambda model: (
-        {"CURSOR_MODEL": str(model)} if model else {}
-    ),
-}
+_ENV_TRANSLATORS = {"recursive": _recursive_env, "claude": _claude_env}
 
 # flowcast CLI 名 → agentproc executor 名（executor/agentproc-adapter.js 的映射子集）
 EXECUTOR_ALIASES = {
@@ -210,15 +169,6 @@ def resolve_agent(name: str, repo: Optional[str] = None, environ: Optional[Dict[
         env.update(translator(bundle, model))
         if not model:
             model = bundle.get("model")
-    elif executor in _MODEL_ONLY_TRANSLATORS:
-        # 无 provider 的**锁定型 CLI**：仍必须把 ``model`` 翻译成该执行器读的
-        # env，否则 ``agents.json`` 里写的模型被静默忽略、实际走 CLI 默认模型
-        # （2026-10-10 实测：cursor executor 的 build_args 只读 ``CURSOR_MODEL``）。
-        #
-        # ⚠️ 只对**不需要 provider bundle** 的执行器生效（模型是单值）。
-        # 绝不能对 recursive/claude 生效：它们的 env 依赖 bundle 的
-        # apiBase/apiKey，传空 dict 会 KeyError（实测连锁 7 个用例失败）。
-        env.update(_MODEL_ONLY_TRANSLATORS[executor](model))
     # profile.env 透传（flowcast 白名单会丢弃这里；见模块 docstring）
     for key, value in (profile.get("env") or {}).items():
         env[str(key)] = str(value)
