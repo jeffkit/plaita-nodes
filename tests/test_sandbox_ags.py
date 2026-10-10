@@ -303,6 +303,43 @@ def test_root_execution_id_walks_up_to_root():
     assert sb.root_execution_id(root) == root.execution_id
 
 
+def test_preserve_scene_pauses_instead_of_killing():
+    """失败/取消路径**一律 pause**（用户口径「不能都 kill」+ 续跑原地接力）。
+
+    实测依据：`Sandbox.connect(paused)` 自动恢复且工作区完好 ⇒ 重启/重投打断的 run
+    能 attach 回同一实例继续；旧行为「synced 成功即 kill」会让每次重启都白丢沙箱。
+    """
+    from plaita_nodes.sandbox import WorkspaceHandle
+    from plaita_nodes.sandbox_agent import SandboxAgentNode
+
+    calls: list = []
+
+    class _Client:
+        def pause(self, iid):
+            calls.append(("pause", iid))
+
+    class _Driver:
+        client = _Client()
+
+        def release(self, handle, keep_data=True):   # 不该被调到
+            calls.append(("release", handle.id, keep_data))
+
+    handle = WorkspaceHandle(driver="ags", id="inst-1", path="/work",
+                             ws_key="main", execution_id="e1")
+    SandboxAgentNode._preserve_scene(_Driver(), handle)
+    assert calls == [("pause", "inst-1")]
+
+    # 无 pause 能力的 driver（本地 docker 等）→ release(keep_data=True) 保数据
+    calls.clear()
+
+    class _DriverNoPause:
+        def release(self, handle, keep_data=True):
+            calls.append(("release", handle.id, keep_data))
+
+    SandboxAgentNode._preserve_scene(_DriverNoPause(), handle)
+    assert calls == [("release", "inst-1", True)]
+
+
 def test_should_sweep_paused_decision_table():
     """暂停清扫决策：只清「自家 metadata + 超龄」的实例（配额安全带）。
 
