@@ -29,7 +29,7 @@ import os
 import signal
 import subprocess
 import threading
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 from pydantic import Field
 
@@ -139,7 +139,16 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
 # ── recursive 直调执行器（语义 = flowcast runRecursiveDirect）──────────
 
 def _make_recursive_handlers():
-    def build_args(message: str, session_id: str, env: dict) -> list:
+    # `_ctx` 是 agentproc 的**可选**第 4 参（`{"permission": ...}`，随
+    # efc95e7「fail-closed permission posture」引入）。此处必须显式接收：
+    # agentproc 恒以**位置参数**调用（`build_args_fn(msg, sid, env, ctx)`），
+    # 签名不匹配会直接抛
+    #   build_args() takes 3 positional arguments but 4 were given
+    # ⇒ **整个 recursive 执行器不可用**。本仓 2026-10-11 实测复现。
+    # 注：recursive-direct 无 permission 桥接（`--permission-mode auto` 已写死
+    # 在 argv 里），故此处不使用 ctx，仅保持签名兼容。
+    def build_args(message: str, session_id: str, env: dict,
+                   _ctx: Optional[Dict[str, Any]] = None) -> list:
         bin_name = env.get("RECURSIVE_BIN", "recursive")
         args = [bin_name, "--workspace", env.get("RECURSIVE_WORKSPACE", "."),
                 "--output-format", env.get("RECURSIVE_OUTPUT_FORMAT", "json"),
