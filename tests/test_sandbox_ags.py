@@ -285,6 +285,64 @@ def test_host_dirty_patch_tracked_bookmark_is_not_deleted(host_repo):
     assert b"deleted file" not in patch
 
 
+class _LocalExecClient(sa.AgsClient):
+    """把「沙箱」当本地目录：exec 在本机 bash 里跑，用于端到端验证 sync_in/out 的 git 行为。"""
+
+    def __init__(self):
+        super().__init__(domain="local", api_key="local")
+
+    def exec_argv(self, instance_id, argv, **kw):
+        import subprocess as _sp
+        r = _sp.run(list(argv), capture_output=True, text=True)
+        return r.returncode, r.stdout, r.stderr
+
+    def put_bytes(self, instance_id, remote_path, data, chunk=sa.UPLOAD_CHUNK):
+        with open(remote_path, "wb") as fh:
+            fh.write(data)
+        return {"bytes": len(data), "secs": 0.0}
+
+
+def test_sync_out_does_not_pull_harness_bookmark(tmp_path):
+    """回归（2026-10-11 阶段 0 止血）：沙箱侧的记忆书签不得经 sync_out 回流宿主。
+
+    沙箱内 agent 改了源码 + 书签 → sync_out 只回写源码；随后沙箱又异步写书签（分叉），
+    下一次 sync_in 必须仍然成功（不因书签分叉而硬失败）。
+    """
+    host = tmp_path / "host"
+    host.mkdir()
+    _git(host, "init", "-q")
+    _git(host, "config", "user.email", "t@t")
+    _git(host, "config", "user.name", "t")
+    (host / "a.txt").write_text("one\n")
+    (host / ".recursive" / "memory").mkdir(parents=True)
+    (host / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n')
+    _git(host, "add", "-A")
+    _git(host, "commit", "-qm", "init")
+
+    sbx = tmp_path / "sbx"
+    subprocess.run(["git", "clone", "-q", str(host), str(sbx)], check=True)
+    _git(sbx, "config", "user.email", "t@t")
+    _git(sbx, "config", "user.name", "t")
+
+    # 沙箱侧：改源码 + 改书签
+    (sbx / "a.txt").write_text("one\nchanged\n")
+    (sbx / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n{"k": 1}\n')
+
+    driver = sa.AgsDriver(client=_LocalExecClient())
+    handle = sb.WorkspaceHandle(driver="ags", id="local", path=str(sbx), ws_key="main",
+                                execution_id="e1", data={"baseline_sha": "x"})
+    driver.sync_out(handle, str(host))
+
+    # 源码回写了；书签没回流（宿主书签仍是原内容、且不在脏改动里）
+    assert (host / "a.txt").read_text() == "one\nchanged\n"
+    assert (host / ".recursive" / "memory" / "facts.jsonl").read_text() == '{"k": 0}\n'
+    assert "facts.jsonl" not in _git(host, "status", "--porcelain", "-uall")
+
+    # 沙箱又异步写书签（分叉）→ 下一次 sync_in 不得因此硬失败
+    (sbx / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n{"k": 1}\n{"k": 2}\n')
+    driver.sync_in(handle, str(host))
+
+
 def test_apply_patch_conflict_raises(host_repo):
     (host_repo / "a.txt").write_text("one\nchanged\n")
     patch = sa._host_dirty_patch(str(host_repo))

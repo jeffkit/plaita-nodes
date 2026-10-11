@@ -446,9 +446,11 @@ class AgsDriver:
 
     def sync_out(self, handle: WorkspaceHandle, host_repo: str) -> Dict[str, Any]:
         """沙箱 → 宿主工作区（本轮 agent 增量补丁；git apply 到宿主 worktree）。"""
+        # 沙箱侧同样排除运行时产物（见 _SYNC_EXCLUDES）：它留在沙箱，不回流宿主，
+        # 从源头切断「宿主脏态 ⇄ 沙箱分叉」的回声（阶段 0 止血，2026-10-11）。
         cmds = (
             f"set -e; cd {shlex.quote(handle.path)}; "
-            f"git add -A; git diff --cached HEAD --binary;")
+            f"git add -A -- . {_pathspec_excludes_shell()}; git diff --cached HEAD --binary;")
         code, out, err = self.client.exec_argv(handle.id, ["bash", "-c", cmds], timeout=300)
         if code != 0:
             raise AgsError(f"sync_out 取补丁失败：{err[:300]}")
@@ -530,8 +532,16 @@ def wrap_argv_from_env(env: Dict[str, str], agent_argv: list) -> list:
 
 # ── 宿主侧补丁工具（GIT_INDEX_FILE 临时索引，不触碰宿主正常索引）─────────
 
-# 宿主→沙箱增量同步时排除的运行时产物（pathspec，见 _host_dirty_patch）
-_HOST_SYNC_EXCLUDES = (".recursive/memory/facts.jsonl",)
+# 增量同步（sync_in / sync_out 两侧）排除的运行时产物（pathspec）。
+# harness 记忆书签由沙箱内 agent 写入；它不属于源码增量，且两侧都改时
+# 必然分叉 ⇒ 不进补丁、不回流宿主。终态方案是把它移出工作区（阶段 0 的正解，
+# 需 recursive 侧支持 RECURSIVE_FACTS_DIR）。
+_SYNC_EXCLUDES = (".recursive/memory/facts.jsonl",)
+
+
+def _pathspec_excludes_shell() -> str:
+    """供 bash -c 拼接的 ``:(exclude)…`` pathspec 串（已 shell 转义）。"""
+    return " ".join(shlex.quote(f":(exclude){p}") for p in _SYNC_EXCLUDES)
 
 
 def _host_dirty_patch(host_repo: str) -> bytes:
@@ -554,7 +564,7 @@ def _host_dirty_patch(host_repo: str) -> bytes:
         # 它是运行时产物而非源码，不属于宿主→沙箱的增量同步范畴。
         add = subprocess.run(
             ["git", "-C", host_repo, "add", "-A", "--", ".",
-             *(f":(exclude){p}" for p in _HOST_SYNC_EXCLUDES)],
+             *(f":(exclude){p}" for p in _SYNC_EXCLUDES)],
             env=env, capture_output=True)
         if add.returncode != 0:
             raise AgsError(f"宿主临时索引 add 失败：{add.stderr.decode('utf-8', 'replace')[:200]}")
