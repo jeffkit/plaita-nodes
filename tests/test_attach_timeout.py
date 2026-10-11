@@ -70,3 +70,15 @@ def test_bad_timeout_env_falls_back_to_default(monkeypatch):
     assert sa._attach_timeout_secs() == sa.AGS_DEFAULT_ATTACH_TIMEOUT
     monkeypatch.setenv("PLAITA_SANDBOX_ATTACH_TIMEOUT", "-3")
     assert sa._attach_timeout_secs() == sa.AGS_DEFAULT_ATTACH_TIMEOUT
+
+
+def test_sandbox_agent_write_back_defaults_true_and_accepts_false():
+    """write_back 默认 True（原行为：成功/失败/取消都 sync_out 回宿主）；
+    冲突落地节点显式设为 False，沙箱 commit 不回写宿主 worktree。"""
+    from plaita_nodes.sandbox_agent import SandboxAgentNode
+
+    default = SandboxAgentNode(id="a", prompt="p", repo="/tmp/wt", sandbox="ags")
+    assert default.write_back is True
+    off = SandboxAgentNode(id="b", prompt="p", repo="/tmp/wt", sandbox="ags",
+                           write_back=False)
+    assert off.write_back is False

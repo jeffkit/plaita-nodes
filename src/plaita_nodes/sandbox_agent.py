@@ -62,6 +62,10 @@ class SandboxAgentNode(AgentRunNode):
     ws_key: Optional[Any] = None
     # 本节点 repo+sandbox 并存是常态（repo=同步源），覆盖父类互斥校验
     timeout_secs: Any = Field(default=3600)
+    # 是否把沙箱侧改动回写宿主（sync_out）。默认 True（原行为）。
+    # False 用于"沙箱只产出、不回写宿主"的节点（如冲突落地：沙箱产出 patch，
+    # 由宿主侧按 patch 在 origin/main 上重建 commit，不能让沙箱新 commit 回写 worktree）。
+    write_back: Any = True
 
     def validate(self) -> None:  # noqa: D102 - 覆盖父类互斥（见类 docstring）
         if self.prompt is None:
@@ -187,6 +191,7 @@ class SandboxAgentNode(AgentRunNode):
                 if profile["env"].get(knob):
                     extra_env[knob] = profile["env"][knob]
             want_details = bool(execution.evaluate(self.details)) if self.details is not None else False
+            want_write_back = bool(execution.evaluate(self.write_back)) if self.write_back is not None else True
             if want_details and executor == "recursive":
                 extra_env["RECURSIVE_OUTPUT_FORMAT"] = "stream-json"
             model = profile.get("model") or extra_env.get("RECURSIVE_MODEL") or agent_name
@@ -202,7 +207,7 @@ class SandboxAgentNode(AgentRunNode):
                 # 取消（含 worker 重启 drain 打断）：先尽力把沙箱侧已有改动捞回宿主
                 # （取消前 agent 可能已改了不少），再 pause 保现场——重投后 ensure()
                 # 按 metadata 找回暂停实例并自动恢复，原地接力。
-                if repo:
+                if repo and want_write_back:
                     try:
                         driver.sync_out(handle, repo)
                     except Exception as exc:  # noqa: BLE001
@@ -212,7 +217,7 @@ class SandboxAgentNode(AgentRunNode):
             if result.error or result.exit_code != 0:
                 # 失败保现场：先尽力把沙箱侧改动同步回宿主（与直跑语义一致），
                 # 然后**一律 pause**（见 _preserve_scene：续跑接力 + 零计算费）
-                if repo:
+                if repo and want_write_back:
                     try:
                         driver.sync_out(handle, repo)
                     except Exception as exc:  # noqa: BLE001
@@ -221,7 +226,7 @@ class SandboxAgentNode(AgentRunNode):
                 raise AgentRunError(
                     redactor.redact(result.error or f"{agent_name} 退出码 {result.exit_code}"))
 
-            if repo:
+            if repo and want_write_back:
                 driver.sync_out(handle, repo)
             text, usage, observations = self._interpret_result(
                 executor=executor, result=result, protocol_lines=protocol_lines,
