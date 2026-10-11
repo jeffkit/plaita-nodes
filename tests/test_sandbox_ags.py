@@ -266,6 +266,25 @@ def test_host_dirty_patch_excludes_harness_memory_bookmark(host_repo):
     assert "facts.jsonl" in _git(host_repo, "status", "--porcelain", "-uall")
 
 
+def test_host_dirty_patch_tracked_bookmark_is_not_deleted(host_repo):
+    """回归（2026-10-11 自查）：被排除的【已跟踪】书签不得被打成「删除」。
+
+    临时索引若为空（未 read-tree HEAD），排除项在索引里缺席，diff --cached HEAD
+    会把它报成 deleted file ⇒ sync_in 会删掉沙箱里的书签。应保持 HEAD 版本、
+    对补丁零影响。
+    """
+    (host_repo / ".recursive" / "memory").mkdir(parents=True)
+    (host_repo / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 1}\n')
+    _git(host_repo, "add", "-A")
+    _git(host_repo, "commit", "-qm", "track bookmark")
+    (host_repo / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 2}\n')
+    (host_repo / "a.txt").write_text("one\nchanged\n")
+    patch = sa._host_dirty_patch(str(host_repo))
+    assert b"a.txt" in patch
+    assert b"facts.jsonl" not in patch
+    assert b"deleted file" not in patch
+
+
 def test_apply_patch_conflict_raises(host_repo):
     (host_repo / "a.txt").write_text("one\nchanged\n")
     patch = sa._host_dirty_patch(str(host_repo))

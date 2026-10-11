@@ -542,6 +542,13 @@ def _host_dirty_patch(host_repo: str) -> bytes:
     """
     with tempfile.TemporaryDirectory(prefix="plaita-ags-idx-") as td:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(td, "index")}
+        # 先把临时索引灌成 HEAD：被排除的【已跟踪】文件保持 HEAD 版本、不进补丁。
+        # 若索引为空，排除项缺席，diff --cached HEAD 会把它报成「删除」，sync_in
+        # 反而会删掉沙箱里的文件（2026-10-11 自查发现，见回归测试）。
+        rt = subprocess.run(["git", "-C", host_repo, "read-tree", "HEAD"],
+                            env=env, capture_output=True)
+        if rt.returncode != 0:
+            raise AgsError(f"宿主临时索引 read-tree 失败：{rt.stderr.decode('utf-8', 'replace')[:200]}")
         # 排除 harness 运行时记忆书签：沙箱 agent 也会改它，宿主侧脏改动叠加到
         # 沙箱树上必然冲突 ⇒ sync_in 硬失败（2026-10-11 线上 VM 15:00 起 3000+ 次）。
         # 它是运行时产物而非源码，不属于宿主→沙箱的增量同步范畴。
