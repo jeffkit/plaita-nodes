@@ -11,12 +11,13 @@
 - **复用同一沙箱**：``(execution_id, ws_key)`` 派生实例身份——同一 flow
   里 implement / fix / review 多次调用默认 ws_key="main"，**共享同一实例**
   （driver.ensure 幂等 attach）；implement 留下的工作区，review 直接接着看。
-- **同步纪律**（补丁双向，宿主索引零触碰）：
-  - ``sync_in``：宿主工作区脏改动（临时索引产 patch）→ 沙箱 ``reset --hard
-    基线`` + apply → 提交 "plaita-sync-in"（沙箱树 == 宿主树）；
+- **同步纪律**（2026-10-11 阶段 1+2：沙箱唯一写者，宿主只收已校验增量）：
+  - 不变量 I：宿主内容树 == 沙箱已提交 HEAD 内容树（排除 harness 书签）；
+  - ``sync_in``：只校验 I（fail-closed），**不**把宿主脏态叠加进沙箱；
   - agent 在沙箱里干活；
-  - ``sync_out``：沙箱增量 patch → 宿主 ``git apply``（不改索引）→ 沙箱
-    提交归一，保持干净。
+  - ``sync_out``：沙箱相对上次同步的增量 → 先校验宿主仍满足 I（否则整体拒绝、
+    零回写）→ 宿主 ``git apply``（不改索引）→ 沙箱内部提交，重建 I。
+  - 宿主从不回流沙箱，因此不存在「累计重放 + 分叉粘滞失败」。
 
 宿主前置（worker env）：``E2B_DOMAIN`` + ``E2B_API_KEY``；沙箱镜像须自带
 envd/expose 49983（见 ``sandbox_ags`` 模块 docstring）。``e2b`` 为可选依赖。

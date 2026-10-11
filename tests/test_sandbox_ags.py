@@ -227,73 +227,65 @@ def test_make_payload_archive_tree_only(host_repo):
     assert len(sha) == 40
 
 
-# ── 宿主补丁（真 git，临时索引不触碰宿主状态）───────────────────────
+# ── 宿主内容树 / 增量补丁（真 git）──────────────────────────────────
 
-def test_host_dirty_patch_and_apply_roundtrip(host_repo):
-    (host_repo / "a.txt").write_text("one\nchanged\n")
-    (host_repo / "new.txt").write_text("brand new\n")
-    patch = sa._host_dirty_patch(str(host_repo))
-    assert b"a.txt" in patch and b"new.txt" in patch
-    # 宿主索引零触碰：git status 仍显示未暂存
-    status = _git(host_repo, "status", "--porcelain")
-    assert " M a.txt" in status or "M a.txt" in status
-    # 应用到另一份克隆（模拟宿主 worktree 落补丁）
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        subprocess.run(["git", "clone", "-q", str(host_repo), str(Path(td, "w"))],
-                       check=True, capture_output=True)
-        _git(Path(td, "w"), "reset", "-q", "--hard", "HEAD")
-        sa._apply_patch(str(Path(td, "w")), patch)
-        assert (Path(td, "w") / "new.txt").read_text() == "brand new\n"
-        assert "changed" in (Path(td, "w") / "a.txt").read_text()
-        # 应用不改索引/不自动提交
-        assert _git(Path(td, "w"), "status", "--porcelain").count("\n") >= 2
+def _diff_patch(repo):
+    return subprocess.run(["git", "-C", str(repo), "diff", "--binary"],
+                          check=True, capture_output=True).stdout
 
 
-def test_host_dirty_patch_excludes_harness_memory_bookmark(host_repo):
-    """回归（2026-10-11）：宿主 harness 记忆书签 facts.jsonl 不得进 sync_in 补丁。
-
-    沙箱 agent 也会改同一文件，宿主侧脏改动叠加到沙箱树上冲突 ⇒ sync_in 硬失败
-    （线上 VM 15:00 起 3000+ 次）。代码改动照常同步。
-    """
-    (host_repo / ".recursive" / "memory").mkdir(parents=True)
-    (host_repo / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 1}\n')
-    (host_repo / "a.txt").write_text("one\nchanged\n")
-    patch = sa._host_dirty_patch(str(host_repo))
-    assert b"a.txt" in patch
-    assert b"facts.jsonl" not in patch
-    # 排除只作用于补丁生成，不改宿主索引/工作区
-    assert "facts.jsonl" in _git(host_repo, "status", "--porcelain", "-uall")
+def test_host_working_tree_equals_head_when_clean(host_repo):
+    head_tree = _git(host_repo, "rev-parse", "HEAD^{tree}").strip()
+    assert sa._host_working_tree(str(host_repo)) == head_tree
 
 
-def test_host_dirty_patch_tracked_bookmark_is_not_deleted(host_repo):
-    """回归（2026-10-11 自查）：被排除的【已跟踪】书签不得被打成「删除」。
-
-    临时索引若为空（未 read-tree HEAD），排除项在索引里缺席，diff --cached HEAD
-    会把它报成 deleted file ⇒ sync_in 会删掉沙箱里的书签。应保持 HEAD 版本、
-    对补丁零影响。
-    """
+def test_host_working_tree_tracks_real_changes_but_ignores_harness(host_repo):
     (host_repo / ".recursive" / "memory").mkdir(parents=True)
     (host_repo / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 1}\n')
     _git(host_repo, "add", "-A")
     _git(host_repo, "commit", "-qm", "track bookmark")
+    t0 = sa._host_working_tree(str(host_repo))
+    # 书签被跟踪且被改写 → 内容树不变（书签不参与等价判定）
     (host_repo / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 2}\n')
+    assert sa._host_working_tree(str(host_repo)) == t0
+    # 真实源码改动 → 内容树变化
     (host_repo / "a.txt").write_text("one\nchanged\n")
-    patch = sa._host_dirty_patch(str(host_repo))
-    assert b"a.txt" in patch
-    assert b"facts.jsonl" not in patch
-    assert b"deleted file" not in patch
+    assert sa._host_working_tree(str(host_repo)) != t0
 
+
+def test_apply_patch_roundtrip(host_repo):
+    (host_repo / "a.txt").write_text("one\nchanged\n")
+    (host_repo / "new.txt").write_text("brand new\n")
+    _git(host_repo, "add", "-N", "new.txt")  # intent-to-add，使 git diff 覆盖新文件
+    patch = _diff_patch(host_repo)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        w = Path(td, "w")
+        subprocess.run(["git", "clone", "-q", str(host_repo), str(w)], check=True, capture_output=True)
+        sa._apply_patch(str(w), patch)
+        assert (w / "new.txt").read_text() == "brand new\n"
+        assert "changed" in (w / "a.txt").read_text()
+
+
+def test_apply_patch_conflict_raises(host_repo):
+    (host_repo / "a.txt").write_text("one\nchanged\n")
+    patch = _diff_patch(host_repo)
+    # 目标侧同文件已有冲突内容
+    (host_repo / "a.txt").write_text("one\nCONFLICTING\nchanged\n")
+    with pytest.raises(sa.AgsError, match="应用"):
+        sa._apply_patch(str(host_repo), patch)
+
+
+# ── 同步协议（不变量 I：宿主内容树 == 沙箱已提交 HEAD 内容树）──────────
 
 class _LocalExecClient(sa.AgsClient):
-    """把「沙箱」当本地目录：exec 在本机 bash 里跑，用于端到端验证 sync_in/out 的 git 行为。"""
+    """把「沙箱」当本地目录：exec 在本机 bash 里跑，端到端验证 sync_in/out 的 git 行为。"""
 
     def __init__(self):
         super().__init__(domain="local", api_key="local")
 
     def exec_argv(self, instance_id, argv, **kw):
-        import subprocess as _sp
-        r = _sp.run(list(argv), capture_output=True, text=True)
+        r = subprocess.run(list(argv), capture_output=True, text=True)
         return r.returncode, r.stdout, r.stderr
 
     def put_bytes(self, instance_id, remote_path, data, chunk=sa.UPLOAD_CHUNK):
@@ -302,12 +294,8 @@ class _LocalExecClient(sa.AgsClient):
         return {"bytes": len(data), "secs": 0.0}
 
 
-def test_sync_out_does_not_pull_harness_bookmark(tmp_path):
-    """回归（2026-10-11 阶段 0 止血）：沙箱侧的记忆书签不得经 sync_out 回流宿主。
-
-    沙箱内 agent 改了源码 + 书签 → sync_out 只回写源码；随后沙箱又异步写书签（分叉），
-    下一次 sync_in 必须仍然成功（不因书签分叉而硬失败）。
-    """
+def _sync_pair(tmp_path):
+    """宿主（含已跟踪书签）+ 由它克隆出的「沙箱」，返回 (host, sbx, driver, handle)。"""
     host = tmp_path / "host"
     host.mkdir()
     _git(host, "init", "-q")
@@ -318,38 +306,81 @@ def test_sync_out_does_not_pull_harness_bookmark(tmp_path):
     (host / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n')
     _git(host, "add", "-A")
     _git(host, "commit", "-qm", "init")
-
     sbx = tmp_path / "sbx"
     subprocess.run(["git", "clone", "-q", str(host), str(sbx)], check=True)
     _git(sbx, "config", "user.email", "t@t")
     _git(sbx, "config", "user.name", "t")
-
-    # 沙箱侧：改源码 + 改书签
-    (sbx / "a.txt").write_text("one\nchanged\n")
-    (sbx / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n{"k": 1}\n')
-
     driver = sa.AgsDriver(client=_LocalExecClient())
     handle = sb.WorkspaceHandle(driver="ags", id="local", path=str(sbx), ws_key="main",
                                 execution_id="e1", data={"baseline_sha": "x"})
-    driver.sync_out(handle, str(host))
+    return host, sbx, driver, handle
 
-    # 源码回写了；书签没回流（宿主书签仍是原内容、且不在脏改动里）
+
+def test_sync_out_does_not_pull_harness_bookmark(tmp_path):
+    """阶段 0 回归：沙箱改的书签不回流宿主；书签文件在宿主仍存在（未被误删）。"""
+    host, sbx, driver, handle = _sync_pair(tmp_path)
+    (sbx / "a.txt").write_text("one\nchanged\n")
+    (sbx / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n{"k": 1}\n')
+    driver.sync_out(handle, str(host))
     assert (host / "a.txt").read_text() == "one\nchanged\n"
     assert (host / ".recursive" / "memory" / "facts.jsonl").read_text() == '{"k": 0}\n'
     assert "facts.jsonl" not in _git(host, "status", "--porcelain", "-uall")
+    driver.sync_in(handle, str(host))  # 书签分叉不影响同步
 
-    # 沙箱又异步写书签（分叉）→ 下一次 sync_in 不得因此硬失败
-    (sbx / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 0}\n{"k": 1}\n{"k": 2}\n')
+
+def test_sync_in_fail_closed_on_host_drift(tmp_path):
+    """阶段 1：宿主有沙箱不知道的改动 → sync_in 拒绝，不静默叠加。"""
+    host, sbx, driver, handle = _sync_pair(tmp_path)
+    (host / "a.txt").write_text("one\nhuman edit\n")
+    with pytest.raises(sa.AgsError, match="fail-closed"):
+        driver.sync_in(handle, str(host))
+
+
+def test_sync_in_ok_when_equivalent(tmp_path):
+    host, sbx, driver, handle = _sync_pair(tmp_path)
+    driver.sync_in(handle, str(host))  # 不抛即通过
+
+
+def test_sync_out_fail_closed_on_host_drift_writes_nothing(tmp_path):
+    """宿主被外部改动后，沙箱的增量不得回写（整体拒绝，宿主零写入）。"""
+    host, sbx, driver, handle = _sync_pair(tmp_path)
+    (sbx / "a.txt").write_text("one\nsandbox edit\n")
+    (host / "a.txt").write_text("one\nhuman edit\n")  # 宿主漂移
+    before = (host / "a.txt").read_text()
+    with pytest.raises(sa.AgsError, match="fail-closed"):
+        driver.sync_out(handle, str(host))
+    assert (host / "a.txt").read_text() == before
+
+
+def test_sync_out_refuses_silent_drift_on_other_file(tmp_path):
+    """宿主漂移在另一文件上时 git apply 仍会成功——必须由前置校验拦下，否则宿主静默偏离沙箱。"""
+    host, sbx, driver, handle = _sync_pair(tmp_path)
+    (host / "other.txt").write_text("human-only\n")
+    _git(host, "add", "-A")
+    _git(host, "commit", "-qm", "human commit on host")
+    (sbx / "a.txt").write_text("one\nsandbox edit\n")
+    with pytest.raises(sa.AgsError, match="fail-closed"):
+        driver.sync_out(handle, str(host))
+    assert (host / "a.txt").read_text() == "one\n"
+
+
+def test_multi_turn_no_sticky_divergence(tmp_path):
+    """旧版粘滞失败的回归：沙箱每轮在 sync_out 之后再异步写一次（分叉），
+    新协议下增量会在下一轮正常回写，sync_in 不得失败，最终宿主与沙箱源码一致。"""
+    host, sbx, driver, handle = _sync_pair(tmp_path)
+    for k in range(1, 4):
+        driver.sync_in(handle, str(host))                       # 入口校验：必须成功
+        with open(sbx / "a.txt", "a") as fh:
+            fh.write(f"t{k}\n")
+        driver.sync_out(handle, str(host))
+        with open(sbx / "a.txt", "a") as fh:                    # 分叉：沙箱异步再写
+            fh.write(f"late{k}\n")
+    # 最后一轮的 late 尚未回写：沙箱侧 sync_in 仍应成功（它只校验已提交状态）
     driver.sync_in(handle, str(host))
-
-
-def test_apply_patch_conflict_raises(host_repo):
-    (host_repo / "a.txt").write_text("one\nchanged\n")
-    patch = sa._host_dirty_patch(str(host_repo))
-    # 目标侧同文件已有冲突内容
-    (host_repo / "a.txt").write_text("one\nCONFLICTING\nchanged\n")
-    with pytest.raises(sa.AgsError, match="应用"):
-        sa._apply_patch(str(host_repo), patch)
+    # 下一轮 sync_out 会把 late 一并回写
+    driver.sync_out(handle, str(host))
+    assert (host / "a.txt").read_text() == (sbx / "a.txt").read_text()
+    assert "late3" in (host / "a.txt").read_text()
 
 
 # ── 节点面 ─────────────────────────────────────────────────────────────

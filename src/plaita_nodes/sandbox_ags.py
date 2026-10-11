@@ -409,62 +409,65 @@ class AgsDriver:
         # 注：不写宿主 sidecar（数据在远端实例磁盘；reaper 走元数据列举，见模块 docstring）
         return True
 
-    # -- 增量同步（host ⇄ sandbox 补丁）--------------------------------
+    # -- 增量同步（不变量 I：宿主内容树 == 沙箱已提交 HEAD 内容树，排除 harness 书签）--
+    #
+    # 2026-10-11 阶段 1+2 设计：沙箱是唯一写者，宿主只接收「已校验的增量」。
+    # - sync_in（阶段 1）只做校验（fail-closed）：不再把宿主脏态叠加进沙箱——那是
+    #   「累计重放 + 分叉即粘滞失败」的根源。宿主若不等价于沙箱已提交状态，直接报错。
+    # - sync_out（阶段 2）只回写「相对上次同步状态的增量」：宿主先校验 I（否则增量无法
+    #   安全叠加），再 git apply 增量，最后沙箱提交本轮、重新建立 I。宿主从不回流沙箱。
 
     def sync_in(self, handle: WorkspaceHandle, host_repo: str) -> Dict[str, Any]:
-        """宿主工作区 → 沙箱（应用宿主脏改动；**增量语义，不丢弃沙箱已有进展**）。
-
-        ⚠️ 关键语义（2026-10-08 修正）：早期实现每次都 ``git reset --hard <基线>``
-        ——那是**破坏性**的：沙箱 agent 的成果只存在于沙箱（宿主 worktree 是干净的），
-        reset 会把它们连同后续门禁/评审看到的工作区一起抹掉（实测表现为门禁
-        ``changed_files=0``、no tests ran）。正确做法是**基于沙箱当前 HEAD 应用
-        宿主增量补丁**：宿主侧新出现的改动合进来，沙箱已有的提交保持不动。
-
-        实现：先把宿主脏改动打成补丁（对比基线），在**沙箱当前树**上 ``git apply``
-        （三方已有内容不重复应用），冲突则硬失败交上层——不静默丢改动。
-        """
+        """校验宿主与沙箱已提交状态等价（fail-closed，不做任何写入）。"""
         baseline = self._baseline(handle)
-        patch = _host_dirty_patch(host_repo)   # 宿主 vs 其 HEAD（含未跟踪）
-        tmpp = "/tmp/plaita-sync-in.patch"
-        if patch:
-            self.client.put_bytes(handle.id, tmpp, patch)
-        cmds = f"set -e; cd {shlex.quote(handle.path)}; "
-        if patch:
-            # 增量应用：只把宿主新改动叠加进来。已在树里的内容 apply 会报
-            # "already applied" → 用 --3way 容忍，其余错误照实抛出。
-            cmds += (f"(git apply --3way --whitespace=nowarn {shlex.quote(tmpp)} 2>&1 "
-                     f"|| git apply --whitespace=nowarn {shlex.quote(tmpp)} 2>&1 "
-                     f"|| echo 'PAITA_SYNC_IN_APPLY_FAILED'); rm -f {shlex.quote(tmpp)}; ")
-        cmds += "git add -A; git commit -qm 'plaita-sync-in' --allow-empty; " \
-                "git log --oneline -1; "
-        code, out, err = self.client.exec_argv(handle.id, ["bash", "-c", cmds], timeout=300)
-        if code != 0:
-            raise AgsError(f"sync_in 失败：{err[:300] or out[:300]}")
-        if "PAITA_SYNC_IN_APPLY_FAILED" in (out or ""):
-            raise AgsError(f"sync_in 补丁应用失败（沙箱树与宿主不等价）：{out[:200]}")
-        return {"patch_bytes": len(patch), "baseline": baseline[:12]}
+        host_tree = _host_working_tree(host_repo)
+        sbx_tree = self._sandbox_committed_tree(handle)
+        if host_tree != sbx_tree:
+            raise AgsError(
+                "sync_in 拒绝（fail-closed）：宿主工作区与沙箱已提交状态不等价"
+                "（宿主有未受控改动，或沙箱外被改写）。不静默叠加，请先处理宿主侧改动后重试。")
+        return {"in_sync": True, "baseline": baseline[:12]}
 
     def sync_out(self, handle: WorkspaceHandle, host_repo: str) -> Dict[str, Any]:
-        """沙箱 → 宿主工作区（本轮 agent 增量补丁；git apply 到宿主 worktree）。"""
-        # 沙箱侧同样排除运行时产物（见 _SYNC_EXCLUDES）：它留在沙箱，不回流宿主，
-        # 从源头切断「宿主脏态 ⇄ 沙箱分叉」的回声（阶段 0 止血，2026-10-11）。
+        """沙箱 → 宿主：回写本轮增量（相对上次同步状态），然后沙箱内部提交归一。"""
         cmds = (
             f"set -e; cd {shlex.quote(handle.path)}; "
-            f"git add -A -- . {_pathspec_excludes_shell()}; git diff --cached HEAD --binary;")
+            f"git add -A -- . {_pathspec_excludes_shell()}; "
+            f"git diff --cached HEAD --binary;")
         code, out, err = self.client.exec_argv(handle.id, ["bash", "-c", cmds], timeout=300)
         if code != 0:
             raise AgsError(f"sync_out 取补丁失败：{err[:300]}")
         patch = out.encode("utf-8")
+        applied = False
         if patch.strip():
+            # 增量只能叠加到「与沙箱已提交状态等价」的宿主上；否则拒绝，不做任何回写
+            host_tree = _host_working_tree(host_repo)
+            sbx_tree = self._sandbox_committed_tree(handle)
+            if host_tree != sbx_tree:
+                raise AgsError(
+                    "sync_out 拒绝（fail-closed）：宿主不等价于沙箱已提交状态，增量无法安全叠加；"
+                    "本次未做任何回写。")
             applied = _apply_patch(host_repo, patch)
-        else:
-            applied = False
-        # 归一：沙箱侧提交本轮，保持工作树干净（下轮 sync_in 会 reset 基线）
-        self.client.exec_argv(
-            handle.id, ["bash", "-c", f"cd {shlex.quote(handle.path)} && "
+        # 沙箱侧归一：内部提交本轮，重新建立不变量 I（提交不外泄，不进宿主）
+        code, _, err = self.client.exec_argv(
+            handle.id, ["bash", "-c", f"set -e; cd {shlex.quote(handle.path)}; "
                                       f"git commit -qm 'plaita-agent-turn' --allow-empty"],
             timeout=120)
+        if code != 0:
+            raise AgsError(f"sync_out 沙箱归一提交失败：{err[:300]}")
         return {"patch_bytes": len(patch), "applied": applied}
+
+    def _sandbox_committed_tree(self, handle: WorkspaceHandle) -> str:
+        """沙箱已提交 HEAD 的内容树（排除 harness 书签；不看沙箱工作区未提交改动）。"""
+        excl = " ".join(shlex.quote(p) for p in _SYNC_EXCLUDES)
+        cmds = (
+            f"set -e; cd {shlex.quote(handle.path)}; IDX=$(mktemp -u); "
+            f"export GIT_INDEX_FILE=$IDX; git read-tree HEAD; "
+            f"git rm --cached -q --ignore-unmatch -- {excl}; git write-tree; rm -f $IDX")
+        code, out, err = self.client.exec_argv(handle.id, ["bash", "-c", cmds], timeout=120)
+        if code != 0 or not out.strip():
+            raise AgsError(f"取沙箱已提交树失败：{err[:300]}")
+        return out.strip().splitlines()[-1].strip()
 
     def _baseline(self, handle: WorkspaceHandle) -> str:
         if handle.data.get("baseline_sha"):
@@ -544,36 +547,30 @@ def _pathspec_excludes_shell() -> str:
     return " ".join(shlex.quote(f":(exclude){p}") for p in _SYNC_EXCLUDES)
 
 
-def _host_dirty_patch(host_repo: str) -> bytes:
-    """宿主工作区未提交改动（含未跟踪）vs HEAD 的二进制补丁。
+def _host_working_tree(host_repo: str) -> str:
+    """宿主工作区内容树（HEAD + 未提交改动，排除 harness 书签）。
 
-    用临时索引 ``git add -A`` 后 ``diff --cached``：宿主正常索引/工作区
-    状态零触碰（评审同款纪律）。
+    临时索引从 HEAD 起步（read-tree），再 add 工作区、剔除书签条目——宿主正常
+    索引/工作区零触碰。剔除而非仅 pathspec 排除：已跟踪书签若不在索引里，会被
+    后续比较当成「删除」（2026-10-11 自查 bug）。
     """
     with tempfile.TemporaryDirectory(prefix="plaita-ags-idx-") as td:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(td, "index")}
-        # 先把临时索引灌成 HEAD：被排除的【已跟踪】文件保持 HEAD 版本、不进补丁。
-        # 若索引为空，排除项缺席，diff --cached HEAD 会把它报成「删除」，sync_in
-        # 反而会删掉沙箱里的文件（2026-10-11 自查发现，见回归测试）。
-        rt = subprocess.run(["git", "-C", host_repo, "read-tree", "HEAD"],
-                            env=env, capture_output=True)
-        if rt.returncode != 0:
-            raise AgsError(f"宿主临时索引 read-tree 失败：{rt.stderr.decode('utf-8', 'replace')[:200]}")
-        # 排除 harness 运行时记忆书签：沙箱 agent 也会改它，宿主侧脏改动叠加到
-        # 沙箱树上必然冲突 ⇒ sync_in 硬失败（2026-10-11 线上 VM 15:00 起 3000+ 次）。
-        # 它是运行时产物而非源码，不属于宿主→沙箱的增量同步范畴。
-        add = subprocess.run(
-            ["git", "-C", host_repo, "add", "-A", "--", ".",
-             *(f":(exclude){p}" for p in _SYNC_EXCLUDES)],
-            env=env, capture_output=True)
-        if add.returncode != 0:
-            raise AgsError(f"宿主临时索引 add 失败：{add.stderr.decode('utf-8', 'replace')[:200]}")
-        diff = subprocess.run(
-            ["git", "-C", host_repo, "diff", "--cached", "HEAD", "--binary"],
-            env=env, capture_output=True)
-        if diff.returncode != 0:
-            raise AgsError(f"宿主补丁生成失败：{diff.stderr.decode('utf-8', 'replace')[:200]}")
-        return diff.stdout
+        steps = [
+            ["read-tree", "HEAD"],
+            ["add", "-A", "--", ".", *(f":(exclude){p}" for p in _SYNC_EXCLUDES)],
+            ["rm", "--cached", "-q", "--ignore-unmatch", "--", *_SYNC_EXCLUDES],
+            ["write-tree"],
+        ]
+        out = ""
+        for args in steps:
+            r = subprocess.run(["git", "-C", host_repo, *args],
+                               env=env, capture_output=True)
+            if r.returncode != 0:
+                raise AgsError(
+                    f"宿主内容树计算失败（git {args[0]}）：{r.stderr.decode('utf-8', 'replace')[:200]}")
+            out = r.stdout.decode("utf-8", "replace")
+        return out.strip()
 
 
 def _apply_patch(host_repo: str, patch: bytes) -> bool:
