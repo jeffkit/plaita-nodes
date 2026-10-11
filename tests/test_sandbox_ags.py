@@ -250,6 +250,22 @@ def test_host_dirty_patch_and_apply_roundtrip(host_repo):
         assert _git(Path(td, "w"), "status", "--porcelain").count("\n") >= 2
 
 
+def test_host_dirty_patch_excludes_harness_memory_bookmark(host_repo):
+    """回归（2026-10-11）：宿主 harness 记忆书签 facts.jsonl 不得进 sync_in 补丁。
+
+    沙箱 agent 也会改同一文件，宿主侧脏改动叠加到沙箱树上冲突 ⇒ sync_in 硬失败
+    （线上 VM 15:00 起 3000+ 次）。代码改动照常同步。
+    """
+    (host_repo / ".recursive" / "memory").mkdir(parents=True)
+    (host_repo / ".recursive" / "memory" / "facts.jsonl").write_text('{"k": 1}\n')
+    (host_repo / "a.txt").write_text("one\nchanged\n")
+    patch = sa._host_dirty_patch(str(host_repo))
+    assert b"a.txt" in patch
+    assert b"facts.jsonl" not in patch
+    # 排除只作用于补丁生成，不改宿主索引/工作区
+    assert "facts.jsonl" in _git(host_repo, "status", "--porcelain", "-uall")
+
+
 def test_apply_patch_conflict_raises(host_repo):
     (host_repo / "a.txt").write_text("one\nchanged\n")
     patch = sa._host_dirty_patch(str(host_repo))

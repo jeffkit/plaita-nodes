@@ -530,6 +530,10 @@ def wrap_argv_from_env(env: Dict[str, str], agent_argv: list) -> list:
 
 # ── 宿主侧补丁工具（GIT_INDEX_FILE 临时索引，不触碰宿主正常索引）─────────
 
+# 宿主→沙箱增量同步时排除的运行时产物（pathspec，见 _host_dirty_patch）
+_HOST_SYNC_EXCLUDES = (".recursive/memory/facts.jsonl",)
+
+
 def _host_dirty_patch(host_repo: str) -> bytes:
     """宿主工作区未提交改动（含未跟踪）vs HEAD 的二进制补丁。
 
@@ -538,8 +542,13 @@ def _host_dirty_patch(host_repo: str) -> bytes:
     """
     with tempfile.TemporaryDirectory(prefix="plaita-ags-idx-") as td:
         env = {**os.environ, "GIT_INDEX_FILE": os.path.join(td, "index")}
-        add = subprocess.run(["git", "-C", host_repo, "add", "-A"],
-                             env=env, capture_output=True)
+        # 排除 harness 运行时记忆书签：沙箱 agent 也会改它，宿主侧脏改动叠加到
+        # 沙箱树上必然冲突 ⇒ sync_in 硬失败（2026-10-11 线上 VM 15:00 起 3000+ 次）。
+        # 它是运行时产物而非源码，不属于宿主→沙箱的增量同步范畴。
+        add = subprocess.run(
+            ["git", "-C", host_repo, "add", "-A", "--", ".",
+             *(f":(exclude){p}" for p in _HOST_SYNC_EXCLUDES)],
+            env=env, capture_output=True)
         if add.returncode != 0:
             raise AgsError(f"宿主临时索引 add 失败：{add.stderr.decode('utf-8', 'replace')[:200]}")
         diff = subprocess.run(
