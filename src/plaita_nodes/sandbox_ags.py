@@ -57,6 +57,39 @@ META_EXECUTION = "plaita_execution"
 META_WS = "plaita_ws"
 # 默认实例时长（秒）；spec.resources.timeout_secs 可覆盖
 AGS_DEFAULT_TIMEOUT = 7200
+# attach（连接已有沙箱）的有界等待秒数；覆盖 SDK 无超时挂死的情形
+AGS_DEFAULT_ATTACH_TIMEOUT = 45.0
+
+
+def _attach_timeout_secs() -> float:
+    raw = (os.environ.get("PLAITA_SANDBOX_ATTACH_TIMEOUT") or "").strip()
+    try:
+        val = float(raw) if raw else AGS_DEFAULT_ATTACH_TIMEOUT
+    except ValueError:
+        val = AGS_DEFAULT_ATTACH_TIMEOUT
+    return val if val > 0 else AGS_DEFAULT_ATTACH_TIMEOUT
+
+
+def _call_with_timeout(fn: Callable[[], Any], timeout: float, what: str) -> Any:
+    """在守护线程里执行 ``fn``，超时抛 ``AgsError``（不等待挂死的线程）。
+
+    任何异常都归一为 ``AgsError``，使上层（节点）只需处理一种失败类型。
+    挂死线程是 daemon，进程退出时不阻塞；它不持有宿主状态，泄漏可接受。
+    """
+    import concurrent.futures as _cf
+
+    pool = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="ags-attach")
+    fut = pool.submit(fn)
+    try:
+        return fut.result(timeout=timeout)
+    except _cf.TimeoutError as exc:
+        raise AgsError(f"{what} 超时（>{timeout:g}s）：沙箱疑似失联") from exc
+    except AgsError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 统一归一为 AgsError
+        raise AgsError(f"{what} 失败：{exc}") from exc
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 # 分块上传步长（base64 字符数；AGS 数据面实测 100KB/往返 ≈1.3s）
 UPLOAD_CHUNK = 100_000
 
@@ -126,8 +159,19 @@ class AgsClient:
         return str(sbx.sandbox_id)
 
     def attach(self, instance_id: str):
+        """连接已有沙箱。带**有界超时**——沙箱失联时不能让节点静默挂死。
+
+        2026-10-11 实测：沙箱刚创建即失联（``Paused sandbox ... not found``），
+        ``Sandbox.connect`` 在旧实现里无超时，``impl`` 节点挂起 33 分钟且无任何
+        日志，只能靠 zombie 检测兜底。现在：超时或任何连接异常统一抛
+        ``AgsError``，由节点失败 → flow 重试策略接管（快速失败，可观测）。
+        """
         Sandbox = self._sandbox_cls()
-        return Sandbox.connect(instance_id)
+        return _call_with_timeout(
+            lambda: Sandbox.connect(instance_id),
+            _attach_timeout_secs(),
+            f"attach({instance_id})",
+        )
 
     def kill(self, instance_id: str) -> None:
         try:
