@@ -280,7 +280,10 @@ class TestRegisterSandboxExecutor:
         from agentproc import EXECUTORS
 
         def make():
-            def build_args(message, session_id, env):
+            # 桩须与**真实 executor 契约**同形：agentproc 以位置参数传第 4 参
+            # `_ctx`（`{"permission": ...}`，随 efc95e7 引入）。包装层会原样
+            # 转发，故桩写成 3 参会让包装层的 4 参调用失败（2026-10-11 实测）。
+            def build_args(message, session_id, env, _ctx=None):
                 return ["echo", message]
             return {"build_args": build_args, "cli_name": "echo"}
 
@@ -602,3 +605,43 @@ class TestCollectSnapshots:
     def test_empty_context(self):
         assert sb.collect_workspace_snapshots({}) == []
         assert sb.collect_workspace_snapshots({"$NODE": None}) == []
+
+
+def test_sandbox_build_args_forwards_ctx():
+    """沙箱包装层的 build_args 必须接收并**转发** agentproc 的第 4 参 `_ctx`。
+
+    2026-10-11 生产实证：`register_sandbox_executor` 的包装层写成 3 参
+    （`build_args(message, session_id, env)`），而 agentproc 恒以**位置参数**
+    传第 4 参（`{"permission": ...}`，随 `efc95e7` 引入）⇒
+
+        build_args() takes 3 positional arguments but 4 were given
+
+    ⇒ **整个 `<base>-sandbox` executor 不可用**，是当期最大失败源
+    （近 1h Mac 72 次 / VM 65 次）。同类缺陷在 `agent_run.py` 的 recursive
+    直调路径已先修（f8bd3af），此处是沙箱包装层的等价处。
+
+    本用例钉死「包装层收 4 参 + 原样转发给 base」，防再次漏改。
+    """
+    from agentproc import EXECUTORS
+
+    seen = {}
+
+    def make():
+        def build_args(message, session_id, env, _ctx=None):
+            seen["ctx"] = _ctx
+            return ["echo", message]
+        return {"build_args": build_args, "cli_name": "echo"}
+
+    EXECUTORS["ctx-probe"] = {"cli_name": "echo", "plain": True,
+                              "make_handlers": make}
+    try:
+        name = register_sandbox_executor("ctx-probe")
+        h = EXECUTORS[name]["make_handlers"]()
+        # 按 agentproc 的真实调用形态传 4 个位置参数
+        argv = h["build_args"]("hi", "", {}, {"permission": "deny"})
+        assert argv == ["echo", "hi"], argv
+        assert seen.get("ctx") == {"permission": "deny"}, \
+            f"包装层必须把 _ctx 原样转发给 base，实得 {seen.get('ctx')!r}"
+    finally:
+        EXECUTORS.pop("ctx-probe", None)
+        EXECUTORS.pop("ctx-probe-sandbox", None)

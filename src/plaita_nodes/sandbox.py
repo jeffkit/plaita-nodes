@@ -558,8 +558,17 @@ def register_sandbox_executor(base_name: str) -> str:
         if not callable(base_build):
             raise SandboxConfigError(f"executor '{base_name}' 没有 build_args")
 
-        def build_args(message, session_id, env):
-            argv = base_build(message, session_id, env)
+        # `_ctx` 是 agentproc 的**可选**第 4 参（`{"permission": ...}`，随
+        # `efc95e7`「fail-closed permission posture」以**位置参数**传入）：
+        #   `build_args_fn(msg, sid, env, ctx)`   ← runner.py:934-938
+        # 故包装层必须显式接收并**原样转发**，否则抛
+        #   build_args() takes 3 positional arguments but 4 were given
+        # ⇒ 整个 `<base>-sandbox` executor 不可用（2026-10-11 生产实证：
+        #   近 1h 内 Mac 72 次 / VM 65 次该报错，是当期最大失败源）。
+        # 注：`agent_run.py:150` 的 recursive 直调 build_args 是同一坑的另一处，
+        # 已先行修复（f8bd3af）；此处是**沙箱包装层**的等价缺陷。
+        def build_args(message, session_id, env, _ctx=None):
+            argv = base_build(message, session_id, env, _ctx)
             if env.get(SANDBOX_ENV_FLAG) == "1":
                 argv = wrap_agent_argv_from_env(env, list(argv))
             return argv
