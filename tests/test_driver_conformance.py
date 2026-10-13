@@ -73,7 +73,15 @@ def _driver_available(name: str) -> bool:
 def _pull(image: str) -> bool:
     if "@" in image:
         return True
+    # AGS 的 DRIVER_IMAGE 是**沙箱模板名**（不是 OCI 镜像）⇒ 没有 `docker pull`
+    # 这一步，模板由 AGS 侧管理，直接放行。
+    # （2026-10-13 实测：此前 `cmd=None` 会传给 subprocess ⇒
+    #   `TypeError: 'NoneType' object is not iterable`，6 个用例全 ERROR。）
+    if image == DRIVER_IMAGE.get("ags"):
+        return True
     cmd = ["docker", "pull", image] if image.endswith(":latest") or ":" in image else None
+    if cmd is None:
+        return True
     try:
         return subprocess.run(cmd, capture_output=True, timeout=600).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -97,6 +105,29 @@ def _cleanup_quiet(argv: list) -> None:
         pass
 
 
+def _ags_cleanup() -> None:
+    """清理 AGS 侧可能残留的沙箱（**按量计费 ⇒ 必须清**）。
+
+    为什么单独写：`_cleanup_resources` 原先只清 docker/krunvm 的**本地**资源
+    （`docker rm` / `krunvm delete`），**AGS 是远端云沙箱，没有本地残留可清** ——
+    若不做这一步，开 `PLAITA_CONFORMANCE_AGS=1` 跑一次就会**留下真实计费实例**。
+
+    做法：走 driver 自己的 `ensure/release` 语义 —— 用与该用例相同的
+    `WorkspaceSpec`（同 `name`/`template`）拿到同一 handle，再 `release`。
+    handle 由 `(execution_id, ws_key)` **确定性派生**（`sandbox.handle_id`），
+    故无需保存状态即可重建。
+    """
+    if "ags" not in ALL_DRIVERS:
+        return
+    try:
+        drv = sb.get_driver("ags")
+        spec = _spec("ags")
+        handle = drv.ensure(spec, EXEC_ID, WS_KEY)
+        drv.release(handle, keep_data=False)
+    except Exception as exc:  # noqa: BLE001 —— 清理失败必须**响亮**但不掩蔽测试结论
+        print(f"[conformance] ⚠ AGS 清理失败，请人工核查是否残留计费实例：{exc!r}")
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_resources():
     yield
@@ -106,6 +137,7 @@ def _cleanup_resources():
     _cleanup_quiet(["docker", "volume", "rm", "--force",
                     resource_name(EXEC_ID, WS_KEY, "vol")])
     _cleanup_quiet(["krunvm", "delete", vm])
+    _ags_cleanup()
 
 
 @pytest.fixture(params=ALL_DRIVERS, ids=ALL_DRIVERS)
@@ -135,13 +167,30 @@ class TestConformance:
     def test_c8_unpinned_rejected(self, driver):
         if driver.name == "krunvm":
             pytest.skip("krunvm E2E 用 allow_unpinned 注册表；pin 拒绝由 docker 档覆盖同一实现")
+        if driver.name == "ags":
+            # AGS 的 DRIVER_IMAGE 是**沙箱模板名**（不是 OCI 引用）⇒ 没有 digest 可 pin，
+            # 该 driver 不实现 `SandboxPinError`。这是**能力差异**，不是缺陷：
+            # 「未 pin 拒绝」这条约束对本地镜像型 driver 才有意义。
+            # ⚠ 记入 docs：AGS 的供应链保证依赖**模板名在 AGS 侧的管理**，本仓不校验。
+            pytest.skip("ags 用沙箱模板名而非 OCI 引用 ⇒ 无 digest 可 pin（能力差异，非缺陷）")
         with pytest.raises(SandboxPinError):
             driver.ensure(_unpinned_spec(driver.name), EXEC_ID, WS_KEY)
 
     def test_c1_ensure_idempotent_attach(self, driver, tmp_path):
         spec = _spec(driver.name, allow_unpinned=True)
         handle = driver.ensure(spec, EXEC_ID, WS_KEY)
-        # 现场标记：docker 写进卷 / krunvm 写进数据目录（宿主侧）
+        # 现场标记：docker 写进卷 / krunvm 写进数据目录（**宿主侧**）。
+        if driver.name == "ags":
+            # AGS 是**远端云沙箱**：没有宿主侧 datadir 可写标记。
+            # 仍可验证「二次 ensure = attach 同实例」这条**核心**不变量。
+            # ⚠ `data["fresh"]` 会由 True 变 False（首建 → 复用），**这正是 attach 的证据**，
+            # 所以只能断言 id / container / path 一致，不能整体比较 data。
+            handle2 = driver.ensure(spec, EXEC_ID, WS_KEY)
+            assert handle2.id == handle.id
+            assert handle2.data["container"] == handle.data["container"]
+            assert handle2.data["path"] == handle.data["path"]
+            assert handle2.data["fresh"] is False, "二次 ensure 应复用而非重建"
+            return
         marker_host = Path(handle.data.get("datadir",
                                            "/nonexistent")) / ".conf-marker"
         marker_host.write_text("v1", encoding="utf-8")
