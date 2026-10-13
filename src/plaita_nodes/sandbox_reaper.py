@@ -135,4 +135,11 @@ def enumerate_resources(drivers: Sequence[str], *,
     if "ssh" in drivers:
         from .sandbox_ssh import enumerate_workspaces as _enum_ssh
         out.extend(_enum_ssh())  # v1 恒空：远端巡检需连接面注入（见 sandbox_ssh）
+    if "ags" in drivers:
+        # AGS 此前**没有 enumerate_workspaces** ⇒ 它的孤儿从不被 reaper 回收
+        # （只有 driver 的 sweep_paused 覆盖"暂停实例"）。2026-10-13 补上。
+        # ⚠ 默认 `--drivers` 仍是 `docker,krunvm`（不含 ags）：AGS 是按量计费的
+        # **远端**资源，是否纳入巡检应由部署方显式开启，不默认打开。
+        from .sandbox_ags import enumerate_workspaces as _enum_ags
+        out.extend(_enum_ags(data_root=data_root))
     return out

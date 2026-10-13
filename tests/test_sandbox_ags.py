@@ -564,3 +564,83 @@ def test_host_locked_executors_env_override(monkeypatch):
 
     monkeypatch.setenv("PLAITA_HOST_LOCKED_EXECUTORS", "cursor,foo")
     assert _host_locked_executors() == frozenset({"cursor", "foo"})
+
+
+class TestEnumerateWorkspaces:
+    """AGS 以前**没有** `enumerate_workspaces` ⇒ 其孤儿从不被 reaper 回收。
+
+    2026-10-13 补上。这里钉住两点：
+    1. **只挑自家实例**（带 `plaita_execution` 元数据）——同账号下他人的沙箱绝不碰；
+    2. **失败时抛错而非返回空表** —— 返回 `[]` 会把「查不到」伪装成「没有孤儿」，
+       导致静默放弃清理（本会话反复出现的"沉默的坏"）。
+    """
+
+    def test_enumerates_only_own_instances(self, monkeypatch):
+        from plaita_nodes import sandbox_ags as sa
+
+        class _Inst:
+            def __init__(self, sid, meta):
+                self.sandbox_id = sid
+                self.metadata = meta
+
+        class _Fake(sa.AgsClient):
+            def list_all(self):
+                return [
+                    _Inst("ours-1", {sa.META_EXECUTION: "e1", sa.META_WS: "main"}),
+                    _Inst("theirs", {"someone_else": "x"}),          # 他人的 ⇒ 必须跳过
+                    _Inst("ours-2", {sa.META_EXECUTION: "e2"}),      # 缺 ws ⇒ 默认 main
+                ]
+
+        monkeypatch.setattr(sa, "AgsClient", _Fake)
+        got = sa.enumerate_workspaces()
+        assert [g["execution_id"] for g in got] == ["e1", "e2"]
+        assert all(g["driver"] == "ags" for g in got)
+        assert "theirs" not in [g.get("instance_id") for g in got]
+        assert got[1]["ws_key"] == "main"
+
+    def test_failure_propagates_not_empty(self, monkeypatch):
+        """查不到**必须抛错**——不得静默返回空表假装"没有孤儿"。"""
+        from plaita_nodes import sandbox_ags as sa
+
+        class _Boom(sa.AgsClient):
+            def list_all(self):
+                raise sa.AgsError("模拟列举失败")
+
+        monkeypatch.setattr(sa, "AgsClient", _Boom)
+        with pytest.raises(sa.AgsError):
+            sa.enumerate_workspaces()
+
+
+class TestReaperIncludesAgs:
+    """`enumerate_resources` 支持 ags，但**默认 drivers 不含它**。"""
+
+    def test_ags_included_when_requested(self, monkeypatch):
+        from plaita_nodes import sandbox_reaper as sr
+        from plaita_nodes import sandbox_ags as sa
+
+        monkeypatch.setattr(
+            sa, "enumerate_workspaces",
+            lambda data_root=None: [{"driver": "ags", "execution_id": "e1",
+                                     "ws_key": "main", "instance_id": "i1"}])
+        out = sr.enumerate_resources(["ags"])
+        assert [x["driver"] for x in out] == ["ags"]
+
+    def test_ags_not_default(self):
+        """AGS 是**按量计费**的远端资源 ⇒ 不应默认纳入巡检。
+
+        ⚠ 默认值所在位置（2026-10-13 职责边界拆分后）：
+        `--drivers` 的默认值随 CLI **移到了 plaita 侧**
+        （`scripts/reap_sandboxes.py`）—— 调度/部署属控制面。
+        本仓只保留 `enumerate_resources()` 的**能力**。
+        ⇒ 这里断言的是：**本仓的 `enumerate_resources` 不自行默认包含 ags**
+        （只有显式传 "ags" 才枚举），这才是本仓该负责的那一半。
+        """
+        import inspect
+        from plaita_nodes import sandbox_reaper as sr
+
+        src = inspect.getsource(sr.enumerate_resources)
+        # 枚举函数必须对每个 driver 显式判 membership，不得无条件枚举 ags
+        assert 'if "ags" in drivers' in src, (
+            "ags 未被 `drivers` 成员判断守卫 —— 会无条件枚举（等于默认纳入）"
+        )
+        assert 'if "docker" in drivers' in src

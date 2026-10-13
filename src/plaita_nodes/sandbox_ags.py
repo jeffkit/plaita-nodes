@@ -143,6 +143,23 @@ class AgsClient:
                 return str(sid)
         return None
 
+    def list_all(self) -> list:
+        """列出**本账号全部**沙箱实例（供 `enumerate_workspaces` 用）。
+
+        与 `find` 的区别：`find` 按元数据**精确查一个**，本方法取全量后由调用方
+        过滤 —— 因为孤儿回收要发现的是「**我们不知道存在**的实例」，
+        精确查反而看不见它们。
+
+        ⚠ **失败时抛错，不返回空表**：返回 `[]` 会让调用方把「查不到」
+        误当成「没有孤儿」，进而**静默放弃清理**（本会话反复出现的"沉默的坏"）。
+        """
+        Sandbox = self._sandbox_cls()
+        from e2b.sandbox.sandbox_api import SandboxQuery
+
+        pag = Sandbox.list(SandboxQuery(metadata={}))
+        items = pag.next_items() if hasattr(pag, "next_items") else list(pag)
+        return list(items or [])
+
     def create(self, spec: WorkspaceSpec, execution_id: str, ws_key: str) -> str:
         Sandbox = self._sandbox_cls()
         template = spec.template or spec.image
@@ -668,6 +685,45 @@ def _make_payload(repo: str, rev: str, mode: str) -> tuple:
                 raise AgsError(f"git bundle 失败：{res.stderr.decode('utf-8', 'replace')[:200]}")
         data = Path(out).read_bytes()
     return data, sha
+
+
+
+def enumerate_workspaces(data_root: Optional[str] = None) -> List[Dict[str, str]]:
+    """枚举 AGS 上的**本部署**沙箱实例（供 reaper 回收孤儿）。
+
+    为什么需要它（2026-10-13 实测）：docker/krunvm/ssh 三个 driver 都有
+    `enumerate_workspaces`，**唯独 ags 没有** ⇒
+    `sandbox_reaper.enumerate_resources()` 收不到 AGS 资源
+    ⇒ **AGS 孤儿不会被 reaper 回收**（只有 driver 的 `sweep_paused` 覆盖
+    「暂停实例」，不覆盖 `reap-zombie` / `reap-terminal`）。
+
+    产出形状与兄弟 driver 一致：`[{driver, execution_id, ws_key, ...}]`，
+    只挑带自家 metadata（`plaita_execution` / `plaita_ws`）的实例 ——
+    **同账号下他人的沙箱绝不碰**（与 `should_sweep_paused` 同一安全口径）。
+
+    ⚠ 已知约束：本机 python 的 HTTP 栈（httpx/requests/urllib）对 AGS 主机
+    会确定性失败（`SSL: UNEXPECTED_EOF_WHILE_READING`），只有 `curl` 稳定可用
+    （2026-10-13 实测，见大仓 docs/AGS_SWEEP_TRANSPORT_ISSUE.md）。
+    `AgsClient` 走 e2b（httpx）⇒ **本函数在受影响机器上会抛错**，
+    由调用方（reaper）按「单点失败不中断巡检」处理。**不静默返回空表** ——
+    那会把「查不到」伪装成「没有孤儿」。
+    """
+    del data_root  # AGS 是远端，无本机数据根概念（保持签名兼容）
+    client = AgsClient()
+    out: List[Dict[str, str]] = []
+    for instance in client.list_all():  # pragma: no cover - 需真实 AGS
+        meta = getattr(instance, "metadata", None) or {}
+        exec_id = str(meta.get(META_EXECUTION, "") or "")
+        ws_key = str(meta.get(META_WS, "") or "")
+        if not exec_id:
+            continue                      # 非本部署实例 ⇒ 绝不碰
+        out.append({
+            "driver": "ags",
+            "execution_id": exec_id,
+            "ws_key": ws_key or "main",
+            "instance_id": str(getattr(instance, "sandbox_id", "") or ""),
+        })
+    return out
 
 
 # import 即注册（与 docker 同先例；e2b 懒依赖）
