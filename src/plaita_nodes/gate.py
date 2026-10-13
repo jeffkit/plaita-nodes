@@ -225,6 +225,8 @@ class GateNode(Node):
             if exit_code == 0:
                 break
         return {"passed": exit_code == 0, "gate": self.gate_name,
-                "exit_code": exit_code, "stdout": _clip_tail(stdout or "", _STDOUT_CAP),
-                "stderr": _clip_tail(stderr or "", _STDERR_CAP),
+                # 沙箱路径同样走公共层的 clip_output（plaita#5 抽走了 _clip_tail；
+                # 冲突解决若保留旧名会 NameError —— 由 test_gate_output_tail.py 抓到）。
+                "exit_code": exit_code, "stdout": clip_output(stdout or "", _STDOUT_CAP),
+                "stderr": clip_output(stderr or "", _STDERR_CAP),
                 "retries": max(0, attempt), "dry_run": False, "sandbox": handle.id}

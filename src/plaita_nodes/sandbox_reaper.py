@@ -20,10 +20,8 @@
 """
 from __future__ import annotations
 
-import argparse
 import datetime as _dt
 import logging
-import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from . import sandbox as sb
@@ -138,61 +136,3 @@ def enumerate_resources(drivers: Sequence[str], *,
         from .sandbox_ssh import enumerate_workspaces as _enum_ssh
         out.extend(_enum_ssh())  # v1 恒空：远端巡检需连接面注入（见 sandbox_ssh）
     return out
-
-
-def build_storage(redis_url: Optional[str]):
-    if not redis_url:
-        return None
-    from redis import Redis  # noqa: PLC0415  lazy：plaita[redis]
-    from plaita.storage.redis import RedisExecutionStorage  # noqa: PLC0415
-    return RedisExecutionStorage(client=Redis.from_url(redis_url))
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="python -m plaita_nodes.sandbox_reaper",
-        description="沙箱孤儿回收守护（status-aware，设计 §6.3）")
-    parser.add_argument("--redis-url", default=None,
-                        help="ExecutionStorage 后端（缺省无存储=全部按无主处理）")
-    parser.add_argument("--drivers", default="docker,krunvm",
-                        help="逗号分隔的 driver 列表（默认 docker,krunvm）")
-    parser.add_argument("--data-root", default=None,
-                        help="krunvm 数据根覆盖（默认 ~/.plaita/sandbox-data）")
-    parser.add_argument("--stale-minutes", type=float, default=30.0,
-                        help="running 判僵尸的阈值（默认 30 分钟）")
-    parser.add_argument("--interval", type=float, default=0.0,
-                        help="巡检间隔秒；0=单次巡检退出")
-    parser.add_argument("--keep-data", action="store_true", default=True)
-    parser.add_argument("--purge-data", dest="keep_data", action="store_false",
-                        help="终态/僵尸回收时连数据层一起清（默认保留）")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="只打印决策，不动作")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args(argv)
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s")
-
-    storage = build_storage(args.redis_url)
-    if args.redis_url and storage is None:  # pragma: no cover - 参数面防御
-        logger.error("--redis-url 提供但存储构建失败")
-        return 2
-    if storage is None:
-        logger.warning("未提供 --redis-url：无执行状态可查，所有资源按无主处理")
-
-    drivers = [d.strip() for d in args.drivers.split(",") if d.strip()]
-    while True:
-        resources = enumerate_resources(drivers, data_root=args.data_root)
-        results = run_cycle(storage, resources, stale_minutes=args.stale_minutes,
-                            keep_data=args.keep_data, dry_run=args.dry_run)
-        reaped = sum(1 for r in results if r["decision"].startswith("reap"))
-        logger.info("巡检完成：资源 %d，处置 %d%s", len(results), reaped,
-                    "（dry-run）" if args.dry_run else "")
-        if args.interval <= 0:
-            return 0
-        time.sleep(args.interval)
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
