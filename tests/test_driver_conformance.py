@@ -31,7 +31,13 @@ from plaita_nodes.sandbox import (
 
 EXEC_ID = "conf-exec-0001"
 WS_KEY = "main"
-DRIVER_IMAGE = {"docker": "alpine/git:latest", "krunvm": "alpine:latest"}
+DRIVER_IMAGE = {
+    "docker": "alpine/git:latest",
+    "krunvm": "alpine:latest",
+    # ags 用的是**沙箱模板名**（不是 OCI 镜像）：AGS 侧 ensure 需要 template/image，
+    # 取自本机注册表 `~/.plaita/sandboxes.json` 的 ags spec（生产实测值）。
+    "ags": os.environ.get("PLAITA_AGS_TEMPLATE", "ags-agent-stack"),
+}
 
 
 def _cli_ok(argv: list) -> bool:
@@ -46,6 +52,21 @@ def _driver_available(name: str) -> bool:
         return _cli_ok(["docker", "info", "--format", "{{.ServerVersion}}"])
     if name == "krunvm":
         return _cli_ok(["krunvm", "list"])
+    if name == "ags":
+        # ⚠ **必须显式 opt-in**：AGS 是**按量计费**的云沙箱，且 conformance 会真实
+        # 创建/销毁实例。默认不跑，避免"随手 pytest 就花钱"。
+        # 开法：PLAITA_CONFORMANCE_AGS=1（并确保 E2B_API_KEY / E2B_DOMAIN 已配）。
+        if os.environ.get("PLAITA_CONFORMANCE_AGS", "") != "1":
+            return False
+        if not os.environ.get("E2B_API_KEY"):
+            return False
+        try:
+            # tests/ 不是包（无 __init__.py），故用绝对 import；
+            # pytest 会把 rootdir/tests 加入 sys.path（见 conftest.py 形态）。
+            from _ags_probe import ags_reachable
+        except Exception:  # noqa: BLE001 —— 探针不可用时保守视为不可用
+            return False
+        return ags_reachable()
     return False
 
 
@@ -59,10 +80,13 @@ def _pull(image: str) -> bool:
         return False
 
 
-ALL_DRIVERS = [d for d in ("docker", "krunvm") if _driver_available(d)]
+# AGS 明确**不放进默认列表**（按量计费）；只有显式 opt-in 时 `_driver_available("ags")`
+# 才会返回 True，从而被下面的推导式纳入。
+ALL_DRIVERS = [d for d in ("docker", "krunvm", "ags") if _driver_available(d)]
 
 pytestmark = pytest.mark.skipif(not ALL_DRIVERS,
-                                reason="无可用沙箱 CLI（docker/krunvm）")
+                                reason="无可用沙箱 CLI（docker/krunvm）"
+                                       "（ags 需 PLAITA_CONFORMANCE_AGS=1 显式开启）")
 
 
 def _cleanup_quiet(argv: list) -> None:
