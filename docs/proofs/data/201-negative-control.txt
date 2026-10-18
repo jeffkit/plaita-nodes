@@ -1,0 +1,61 @@
+# plaita#201 负控（negative control）
+
+目的：证明 `#201` 的红→绿来自**修法本身**，不是测试/环境偶然。做法是只还原
+节点侧的三个文件、保留新增测试与 `_safe_path.py` / `_redact.py` 辅助模块，
+即"修法被拿掉，防线只剩 helper"。
+
+## 还原步骤
+
+```bash
+git worktree add --detach /tmp/w39-neg <fix-commit>
+cd /tmp/w39-neg
+git checkout 48d087e -- \
+  src/plaita_nodes/rate_limit.py \
+  src/plaita_nodes/report.py \
+  src/plaita_nodes/database.py \
+  src/plaita_nodes/__init__.py
+PYTHONPATH=/tmp/w39-neg/src python docs/proofs/data/201-repro.py
+PYTHONPATH=/tmp/w39-neg/src python -m pytest tests/test_flow_control_key_safety.py -q
+```
+
+## 结果 1：repro 复现逃逸（exit 1）
+
+```text
+[dotdot/rate_limit] accepted: {'recorded': True, 'key': '../../.plaita/sandboxes', 'total': 1}
+[dotdot/report] accepted: {'written': True, 'entry': {'pwned': True}}
+[dotdot] ESCAPED -> /private/var/.../dotdot/.plaita/sandboxes.json :: '[1792284306.490447]'
+[dotdot] ESCAPED -> /private/var/.../dotdot/.plaita/sandboxes.jsonl :: '{"pwned": true}\n'
+[absolute/rate_limit] accepted: {'recorded': True, 'key': '/var/.../absolute-escape', 'total': 1}
+[absolute] ESCAPED -> /private/var/.../absolute-escape.json :: '[1792284306.541769]'
+[absolute] ESCAPED -> /private/var/.../absolute-escape.jsonl :: '{"pwned": true}\n'
+[normal/rate_limit] {'recorded': True, 'key': 'xhs-publish', 'total': 1} file=True
+VERDICT: VULNERABLE (escaped=4 file(s), normal_ok=True)
+[exit 1]
+```
+
+即：`key`/`token = ../../.plaita/sandboxes` 直接写出**存储目录之外**的
+`.plaita/sandboxes.json` / `.jsonl`；绝对路径输入同样逃逸。与修复后
+（`VERDICT: SAFE ... [exit 0]`）严格对照。
+
+## 结果 2：节点级测试变红（40 failed / 6 passed）
+
+```text
+$ PYTHONPATH=/tmp/w39-neg/src python -m pytest tests/test_flow_control_key_safety.py -q
+...
+FAILED tests/test_flow_control_key_safety.py::test_rate_limit_rejects_escaping_key[dotdot]
+FAILED tests/test_flow_control_key_safety.py::test_report_rejects_escaping_token[dotdot]
+FAILED tests/test_flow_control_key_safety.py::test_report_path_helpers_reject_escaping_token[dotdot]
+FAILED tests/test_flow_control_key_safety.py::test_acquire_rejects_before_creating_lock_file
+E   Failed: DID NOT RAISE <class 'plaita_nodes._safe_path.UnsafePathName'>
+40 failed, 6 passed in 1.50s
+[exit 1]
+```
+
+- 40 条节点级用例复现："`DID NOT RAISE UnsafePathName`"（修复后全绿）。
+- 6 条通过的是 `_safe_path` **辅助函数自身**的用例（helper 未被还原）：
+  `test_error_message_does_not_echo_raw_key`、`test_normal_keys_are_verbatim`、
+  `test_safe_component_is_idempotent_for_valid_names`、
+  `test_safe_component_fails_closed_when_value_is_not_stringifiable`、
+  `test_resolve_child_blocks_traversal_even_without_whitelist`、
+  `test_resolve_child_blocks_symlink_escape`。这正说明红线落在"节点是否真的
+  调用白名单"上，而不是测试桩。

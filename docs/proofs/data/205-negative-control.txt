@@ -1,0 +1,56 @@
+# plaita#205 负控（negative control）
+
+目的：证明 `#205` 的红→绿来自 `sql_query` 的**结果上限**修法。做法是只还原
+`database.py`（节点字段与 `_collect_rows` 全部回到"整表物化"），保留新增测试。
+
+## 还原步骤
+
+```bash
+git worktree add --detach /tmp/w39-neg <fix-commit>
+cd /tmp/w39-neg
+git checkout 48d087e -- src/plaita_nodes/database.py src/plaita_nodes/__init__.py
+PYTHONPATH=/tmp/w39-neg/src python docs/proofs/data/205-repro.py --rows 200000
+PYTHONPATH=/tmp/w39-neg/src python -m pytest tests/test_connectors.py -q -k sql_query
+```
+
+## 结果 1：整表物化（exit 1）
+
+```text
+building sqlite db: 200000 rows ...
+db size: 43.2 MB
+returned rows=200000 rowcount=200000 json_bytes=46.1 MB
+elapsed=0.70s peak_python=94.6 MB
+VERDICT: UNBOUNDED (whole table materialised and returned)
+[exit 1]
+```
+
+对照修复后（同 200k 行、默认上限）：
+
+```text
+raised: SqlResultLimitError: sql_query 结果超过行数上限 max_rows=1000：已读取 1001 行，结果集仍有更多行。fail-closed：不返回部分结果、不静默截断；...
+elapsed=0.01s peak_python=0.5 MB
+VERDICT: BOUNDED (fail-closed, no partial result returned)
+[exit 0]
+```
+
+峰值 Python 分配 94.6 MB → 0.5 MB；JSON 输出 46.1 MB → 0（超限不返回部分结果）。
+
+## 结果 2：上限测试变红（6 failed / 5 passed）
+
+```text
+$ PYTHONPATH=/tmp/w39-neg/src python -m pytest tests/test_connectors.py -q -k sql_query
+FAILED tests/test_connectors.py::test_sql_query_row_limit_fails_closed
+FAILED tests/test_connectors.py::test_sql_query_byte_limit_fails_closed
+FAILED tests/test_connectors.py::test_sql_query_limits_must_be_positive[max_rows]
+FAILED tests/test_connectors.py::test_sql_query_limits_must_be_positive[max_bytes]
+FAILED tests/test_connectors.py::test_sql_query_default_limits
+FAILED tests/test_connectors.py::test_sql_query_memory_stays_bounded_on_large_table
+E   Failed: DID NOT RAISE Exception            # 行/字节/内存上限
+E   AttributeError: 'SqlQueryNode' object has no attribute 'max_rows'  # 默认值
+6 failed, 5 passed, 12 deselected in 1.54s
+[exit 1]
+```
+
+5 条通过的是**上限外的既有语义**（恰好等于上限、上限内逐字一致、写操作不受
+影响），说明还原上限只打穿新增约束，不改变既有契约——修复侧同一组用例全绿
+（`23 passed`）。
