@@ -1,0 +1,76 @@
+{
+  "issue": 205,
+  "repo": "plaita-nodes",
+  "title": "fix(database): sql_query result row/byte limits (fail-closed)",
+  "generated_at": "2026-10-18T01:26:38.364483+00:00",
+  "base_head": "48d087e3c0380544bfd1f47d0fd60963575ed086",
+  "fix_commit_subject": "fix(database): #205 sql_query 结果行数/字节上限——fail-closed 防大表 OOM",
+  "carrier_note": "FROM-OKGUITAR/patch-w39-plaita-nodes.patch not present locally; implemented from the reporter's final fail-closed spec in issue #205 comment 6238... (max_rows=1000, max_bytes=4MiB, fetchmany, named SqlResultLimitError).",
+  "before": {
+    "plaita_nodes_file": "/tmp/wt205-before/src/plaita_nodes/database.py",
+    "rows_total": 100000,
+    "rows_returned": 100000,
+    "rowcount": 100000,
+    "error": null,
+    "observed_rows": null,
+    "peak_mb": 25.84,
+    "elapsed_s": 1.226,
+    "has_max_rows": false,
+    "has_max_bytes": false
+  },
+  "after": {
+    "plaita_nodes_file": "/tmp/wt205-nodes/src/plaita_nodes/database.py",
+    "rows_total": 100000,
+    "rows_returned": null,
+    "rowcount": null,
+    "error": "SqlResultLimitError",
+    "observed_rows": 1001,
+    "peak_mb": 0.29,
+    "elapsed_s": 0.034,
+    "has_max_rows": true,
+    "has_max_bytes": true
+  },
+  "test_runs": {
+    "targeted": "7 passed",
+    "with_connectors": "21 passed",
+    "full_nodes_suite": {
+      "before": {
+        "failed": 11,
+        "passed": 150,
+        "skipped": 2
+      },
+      "after": {
+        "failed": 11,
+        "passed": 157,
+        "skipped": 2
+      },
+      "failure_set_identical": true,
+      "note": "The 11 failures are pre-existing/environmental (agent_run lock tests, registry entry_points, subprocess env isolation); after adds the 7 #205 tests (150→157 passed) with no new failures."
+    },
+    "main_landing_gate_ci": "success: origin/main 1ab7e1b (plaita main repo) latest completed run"
+  },
+  "negative_control": {
+    "mutation": "restore pre-#205 full materialisation (no limits)",
+    "diff_sha256": "ed21c6ba79acd371fb207f724dabc4c77753cfaba6fa6805fcb2cc46c2ddfc19",
+    "test_file": {
+      "failed": 3,
+      "passed": 4
+    },
+    "failed": [
+      "test_row_limit_fails_closed",
+      "test_byte_limit_fails_closed",
+      "test_100k_default_fails_closed_with_bounded_peak"
+    ],
+    "still_green": [
+      "test_under_limit_result_is_unchanged",
+      "test_exact_row_limit_is_allowed",
+      "test_write_path_unchanged",
+      "test_dry_run_unchanged"
+    ]
+  },
+  "defaults": {
+    "max_rows": 1000,
+    "max_bytes": 4194304
+  },
+  "deviation": "Issue suggested truncated=true; the reporter's final delivery chose fail-closed SqlResultLimitError (no partial result) to avoid downstream computation on incomplete data. Named error is the marker."
+}

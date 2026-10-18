@@ -7,10 +7,14 @@
 
 依赖：pip install plaita-nodes[sql]（sqlalchemy + 常用驱动）。
 SELECT 返回 {"rows": [...], "rowcount": n}；写操作返回 {"rowcount": n}。
+**结果上限**（plaita#205）：``max_rows`` 默认 1000、``max_bytes`` 默认
+4 MiB（按行 JSON 编码累计）；超限抛 :class:`SqlResultLimitError`
+（fail-closed，不返回部分结果——静默截断会让下游算错）。
 dry-run（节点字段或 globalContext.dry_run）直接返回 {"rows": [], "rowcount": 0, "dry_run": True}，不解析凭据不连库。
 """
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any, ClassVar, Dict, Optional
 
@@ -19,6 +23,38 @@ from plaita.node.basic import Node
 
 _engine_cache: Dict[str, Any] = {}
 _cache_lock = threading.Lock()
+
+#: plaita#205：SELECT 结果默认上限。行数 + 字节双闸（按行 JSON 编码累计）。
+DEFAULT_MAX_ROWS = 1000
+DEFAULT_MAX_BYTES = 4 * 1024 * 1024
+
+
+class SqlResultLimitError(RuntimeError):
+    """SELECT 结果超过节点上限——fail-closed，不返回部分结果。
+
+    plaita#205：``sql_query`` 原先全量物化；大表会 OOM worker 并把整表写进
+    checkpoint。超过 ``max_rows`` / ``max_bytes`` 时抛本异常（具名标记），
+    日志/调用方能明确看到上限与已读规模；不静默截断（部分结果会让下游算错）。
+    """
+
+    def __init__(
+        self,
+        *,
+        max_rows: int,
+        max_bytes: int,
+        observed_rows: int,
+        observed_bytes: int,
+    ):
+        super().__init__(
+            f"sql_query 结果超过上限（max_rows={max_rows}, max_bytes={max_bytes}）："
+            f"已读取 {observed_rows} 行 / {observed_bytes} 字节；"
+            "拒绝返回部分结果（fail-closed）。请在 SQL 中加 WHERE/LIMIT 缩小结果，"
+            "或显式调大节点的 max_rows/max_bytes。"
+        )
+        self.max_rows = max_rows
+        self.max_bytes = max_bytes
+        self.observed_rows = observed_rows
+        self.observed_bytes = observed_bytes
 
 
 def _get_engine(url: str, **kwargs: Any):
@@ -65,6 +101,10 @@ class SqlQueryNode(Node):
 
     query 支持 $INPUT/$NODE 表达式（求值后为最终 SQL 文本）；params 为
     绑定参数（同名 :param 替换，防注入，同样先经表达式求值）。
+
+    结果上限（plaita#205）：``max_rows`` 默认 1000、``max_bytes`` 默认
+    4 MiB；超过任一上限抛 :class:`SqlResultLimitError`（fail-closed，不返回
+    部分结果）。写操作与 dry-run 不受影响。
     """
 
     node_type: ClassVar[str] = "sql_query"
@@ -74,6 +114,8 @@ class SqlQueryNode(Node):
     query: Any = None
     params: Optional[Dict[str, Any]] = None
     dry_run: bool = False
+    max_rows: int = DEFAULT_MAX_ROWS
+    max_bytes: int = DEFAULT_MAX_BYTES
 
     def execute(self, execution):
         # dry-run 最先判：不解析凭据、不连库（params 可能含敏感值，dry 下不碰）
@@ -91,9 +133,34 @@ class SqlQueryNode(Node):
         bind = {k: _resolve(execution, v) for k, v in (self.params or {}).items()}
 
         engine = _get_engine(url)
+        row_limit = max(1, int(self.max_rows))
+        byte_limit = max(1, int(self.max_bytes))
         with engine.begin() as conn:
-            result = conn.execute(text(sql), bind or {})
+            result = conn.execute(
+                text(sql).execution_options(stream_results=True), bind or {}
+            )
             if result.returns_rows:
-                rows = [dict(r._mapping) for r in result]
+                # plaita#205：分批读取并**先判上限再入列**——不先物化整表再
+                # 检查；超限 fail-closed 抛具名异常，绝不返回部分结果。
+                rows: list[Dict[str, Any]] = []
+                used_bytes = 0
+                batch_size = 256
+                while True:
+                    batch = result.fetchmany(batch_size)
+                    if not batch:
+                        break
+                    for row in batch:
+                        item = dict(row._mapping)
+                        encoded = json.dumps(item, ensure_ascii=False, default=str)
+                        size = len(encoded.encode("utf-8"))
+                        if len(rows) + 1 > row_limit or used_bytes + size > byte_limit:
+                            raise SqlResultLimitError(
+                                max_rows=row_limit,
+                                max_bytes=byte_limit,
+                                observed_rows=len(rows) + 1,
+                                observed_bytes=used_bytes + size,
+                            )
+                        rows.append(item)
+                        used_bytes += size
                 return {"rows": rows, "rowcount": len(rows)}
             return {"rowcount": result.rowcount}

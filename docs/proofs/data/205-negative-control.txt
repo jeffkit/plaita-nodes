@@ -1,0 +1,48 @@
+# plaita#205 负控：恢复全量 [dict(r._mapping) for r in result]
+
+diff --git a/src/plaita_nodes/database.py b/src/plaita_nodes/database.py
+index fb93384..0086968 100644
+--- a/src/plaita_nodes/database.py
++++ b/src/plaita_nodes/database.py
+@@ -140,27 +140,7 @@ class SqlQueryNode(Node):
+                 text(sql).execution_options(stream_results=True), bind or {}
+             )
+             if result.returns_rows:
+-                # plaita#205：分批读取并**先判上限再入列**——不先物化整表再
+-                # 检查；超限 fail-closed 抛具名异常，绝不返回部分结果。
+-                rows: list[Dict[str, Any]] = []
+-                used_bytes = 0
+-                batch_size = 256
+-                while True:
+-                    batch = result.fetchmany(batch_size)
+-                    if not batch:
+-                        break
+-                    for row in batch:
+-                        item = dict(row._mapping)
+-                        encoded = json.dumps(item, ensure_ascii=False, default=str)
+-                        size = len(encoded.encode("utf-8"))
+-                        if len(rows) + 1 > row_limit or used_bytes + size > byte_limit:
+-                            raise SqlResultLimitError(
+-                                max_rows=row_limit,
+-                                max_bytes=byte_limit,
+-                                observed_rows=len(rows) + 1,
+-                                observed_bytes=used_bytes + size,
+-                            )
+-                        rows.append(item)
+-                        used_bytes += size
++                # MUTANT: restore pre-#205 full materialisation (no limits)
++                rows = [dict(r._mapping) for r in result]
+                 return {"rows": rows, "rowcount": len(rows)}
+             return {"rowcount": result.rowcount}
+
+## tests/test_issue205_sql_query_limits.py
+FAILED tests/test_issue205_sql_query_limits.py::test_row_limit_fails_closed
+FAILED tests/test_issue205_sql_query_limits.py::test_byte_limit_fails_closed
+FAILED tests/test_issue205_sql_query_limits.py::test_100k_default_fails_closed_with_bounded_peak
+3 failed, 4 passed in 2.08s
+
+## 仍绿的四条（小于上限/精确边界/写/dry 不受影响）
+- test_under_limit_result_is_unchanged
+- test_exact_row_limit_is_allowed
+- test_write_path_unchanged
+- test_dry_run_unchanged
