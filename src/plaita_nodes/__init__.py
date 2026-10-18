@@ -5,7 +5,7 @@
 """
 from .agent_run import AgentRunError, AgentRunNode, extract_recursive_result, register_recursive_direct
 from .api import ApiRequestNode, GenericWebhookNode
-from .database import SqlQueryNode
+from .database import SqlQueryNode, SqlResultLimitError
 from .decision import DECISION_PROVIDERS, DecisionError, DecisionNode, register_decision_provider
 from .email import EmailSendNode
 from .capture import CaptureConfigError, CaptureNode
@@ -57,7 +57,7 @@ __all__ = [
     "GitPublishNode",
     "ParseJsonNode",
     "GateNode", "RateLimitNode",
-    "ApiRequestNode", "GenericWebhookNode", "SqlQueryNode", "EmailSendNode",
+    "ApiRequestNode", "GenericWebhookNode", "SqlQueryNode", "SqlResultLimitError", "EmailSendNode",
     "FeishuWebhookNode", "WecomWebhookNode", "SlackWebhookNode", "DingtalkWebhookNode",
     "register_all",
     "load_merged_config", "resolve_agent", "resolve_provider", "interpolate",

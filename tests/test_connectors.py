@@ -171,6 +171,108 @@ def test_sql_query_select_and_insert(monkeypatch, tmp_path):
     assert written == {"rowcount": 1}
 
 
+# ---- sql_query 结果上限（#205，fail-closed，不静默截断）----
+
+def _sqlite_rows(monkeypatch, tmp_path, n_rows, payload="x", table="big"):
+    """建一个本地 SQLite 表并注册凭据；返回 (url, cred_name)。"""
+    import sqlalchemy
+
+    db_file = tmp_path / f"{table}.db"
+    url = f"sqlite:///{db_file}"
+    engine = sqlalchemy.create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(sqlalchemy.text(f"CREATE TABLE {table} (id INTEGER, payload TEXT)"))
+        conn.execute(
+            sqlalchemy.text(f"INSERT INTO {table} VALUES (:id, :payload)"),
+            [{"id": i, "payload": payload} for i in range(n_rows)],
+        )
+    engine.dispose()
+    return _cred_env(monkeypatch, tmp_path, f"db-{table}", {"url": url})
+
+
+def test_sql_query_row_limit_fails_closed(monkeypatch, tmp_path):
+    """超过 max_rows：抛可读错误，不返回部分结果（静默截断会让下游算错）。"""
+    cred = _sqlite_rows(monkeypatch, tmp_path, 10, table="ten")
+    with pytest.raises(Exception, match="max_rows=5") as ei:
+        _run_node("sql_query", credential=cred, max_rows=5,
+                  query="SELECT id, payload FROM ten WHERE payload <> 'secret-literal' "
+                        "ORDER BY id")
+    message = str(ei.value)
+    assert "不静默截断" in message
+    assert "fail-closed" in message
+    assert "'secret-literal'" not in message  # 错误消息不带 SQL 文本
+
+
+def test_sql_query_exact_row_limit_passes(monkeypatch, tmp_path):
+    """恰好等于上限不算超限（多读一行仅用于判定"还有更多"）。"""
+    cred = _sqlite_rows(monkeypatch, tmp_path, 5, payload="v", table="five")
+    out = _run_node("sql_query", credential=cred, max_rows=5,
+                    query="SELECT id, payload FROM five ORDER BY id")
+    assert out["rowcount"] == 5 and len(out["rows"]) == 5
+
+
+def test_sql_query_byte_limit_fails_closed(monkeypatch, tmp_path):
+    cred = _sqlite_rows(monkeypatch, tmp_path, 10, payload="y" * 100, table="wide")
+    with pytest.raises(Exception, match="max_bytes=200"):
+        _run_node("sql_query", credential=cred, max_bytes=200,
+                  query="SELECT id, payload FROM wide ORDER BY id")
+
+
+def test_sql_query_under_limits_returns_all_rows_unchanged(monkeypatch, tmp_path):
+    """上限内：输出与修复前逐字一致（只有 rows/rowcount，没有新增字段）。"""
+    cred = _sqlite_rows(monkeypatch, tmp_path, 3, payload="z", table="three")
+    out = _run_node("sql_query", credential=cred,
+                    query="SELECT id, payload FROM three ORDER BY id")
+    assert out == {
+        "rows": [
+            {"id": 0, "payload": "z"},
+            {"id": 1, "payload": "z"},
+            {"id": 2, "payload": "z"},
+        ],
+        "rowcount": 3,
+    }
+
+
+def test_sql_query_write_path_unaffected_by_limits(monkeypatch, tmp_path):
+    """写操作（returns_rows=False）不受结果上限影响。"""
+    cred = _sqlite_rows(monkeypatch, tmp_path, 1, table="w")
+    written = _run_node("sql_query", credential=cred, max_rows=1, max_bytes=1,
+                        query="INSERT INTO w VALUES (99, 'ok')")
+    assert written == {"rowcount": 1}
+
+
+@pytest.mark.parametrize("field", ["max_rows", "max_bytes"])
+def test_sql_query_limits_must_be_positive(monkeypatch, tmp_path, field):
+    cred = _sqlite_rows(monkeypatch, tmp_path, 1, table="lim")
+    with pytest.raises(Exception, match=field):
+        _run_node("sql_query", credential=cred, **{field: 0},
+                  query="SELECT id FROM lim")
+
+
+def test_sql_query_default_limits():
+    from plaita_nodes.database import SqlQueryNode
+
+    node = SqlQueryNode(id="q")
+    assert node.max_rows == 1000
+    assert node.max_bytes == 4 * 1024 * 1024
+
+
+def test_sql_query_memory_stays_bounded_on_large_table(monkeypatch, tmp_path):
+    """2 万行表 + max_rows=50：Python 峰值分配有界（不整表物化）。"""
+    import tracemalloc
+
+    cred = _sqlite_rows(monkeypatch, tmp_path, 20_000, payload="p" * 50, table="huge")
+    tracemalloc.start()
+    try:
+        with pytest.raises(Exception, match="max_rows=50"):
+            _run_node("sql_query", credential=cred, max_rows=50,
+                      query="SELECT * FROM huge")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 20_000_000, f"peak={peak} bytes：结果集被整表物化"
+
+
 # ---- email_send ----
 
 def test_email_send_via_smtp(monkeypatch, tmp_path):

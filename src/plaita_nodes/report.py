@@ -20,9 +20,17 @@ from pydantic import Field
 
 from plaita import Node
 
+from ._safe_path import resolve_child, safe_component
+
 
 def report_path(base_dir: str, token: str) -> Path:
-    return Path(base_dir) / f"{token}.jsonl"
+    """报告文件路径 —— ``token`` 必须是单个文件名分量（#201，白名单 fail-closed）。
+
+    非法 token（``../``、绝对路径、``a/b``、URL 编码、Unicode 同形字符…）抛
+    :class:`~plaita_nodes._safe_path.UnsafePathName`，不静默改名、不落盘。
+    """
+    name = safe_component(token, kind="report token")
+    return resolve_child(base_dir, name, kind="report token", suffix=".jsonl")
 
 
 def append_entry(base_dir: str, token: str, entry: dict) -> None:
@@ -78,7 +86,9 @@ class ReportNode(Node):
 
     def _token(self, execution: Any) -> str:
         token = execution.evaluate(self.token) if self.token is not None else None
-        return str(token or execution.get_global_variable("run_token", "default") or "default")
+        raw = token or execution.get_global_variable("run_token", "default") or "default"
+        # 在读写动作之前校验：非法 token 在触碰文件系统之前就被拒绝（#201）。
+        return safe_component(raw, kind="report token")
 
     def execute(self, execution: Any) -> dict:
         base_dir = self._dir(execution)

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, ClassVar, Optional
@@ -28,6 +29,11 @@ from typing import Any, ClassVar, Optional
 from pydantic import Field
 
 from plaita import Node
+
+from ._redact import _scrub_url_text
+from ._safe_path import resolve_child, safe_component
+
+_log = logging.getLogger(__name__)
 
 
 class RateLimitNode(Node):
@@ -45,14 +51,26 @@ class RateLimitNode(Node):
         return Path(str(d)) if d else Path.home() / ".plaita-nodes" / "rate-limits"
 
     def _key(self, execution: Any) -> str:
-        return str(execution.evaluate(self.key) or "default")
+        """求值后的限频键 —— 必须是**单个文件名分量**（#201，白名单 fail-closed）。
+
+        非法 key（``../``、绝对路径、``a/b``、URL 编码、Unicode 同形字符…）直接
+        抛 :class:`~plaita_nodes._safe_path.UnsafePathName`，绝不静默改名或落盘。
+        """
+        return safe_component(execution.evaluate(self.key) or "default",
+                              kind="rate_limit key")
 
     def _load(self, path: Path) -> list[float]:
         if not path.exists():
             return []
         try:
             return [float(t) for t in json.loads(path.read_text())]
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — 损坏的计数器按空计数继续
+            # 保持历史语义（不因坏文件拒绝服务），但不再静默：#151 纪律要求
+            # 异常至少有日志。path.name 已过白名单，不含原始 key 的路径部分。
+            _log.warning(
+                "rate_limit 计数器无法解析，按空计数继续：file=%s err=%s",
+                path.name, _scrub_url_text(str(exc)),
+            )
             return []
 
     def _save(self, path: Path, timestamps: list[float]) -> None:
@@ -62,7 +80,9 @@ class RateLimitNode(Node):
     def execute(self, execution: Any) -> dict:
         action = self.action
         key = self._key(execution)
-        path = self._dir(execution) / f"{key}.json"
+        # 第二道防线（#201）：resolve 后必须仍在 store_dir 内，否则 fail-closed。
+        path = resolve_child(self._dir(execution), key,
+                             kind="rate_limit key", suffix=".json")
         now = time.time()
 
         if action == "check":
