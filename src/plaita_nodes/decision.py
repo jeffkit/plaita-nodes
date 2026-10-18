@@ -18,6 +18,12 @@ provider 注册表 ``DECISION_PROVIDERS``（仿 agentproc EXECUTORS，开放注�
   决策空间 → answers 里取 {choice, probabilities, confidence}）；端点由
   ``api_base`` 字段或 ``JEV_API_BASE`` 环境变量给出（官方 early-access API
   或自托管 OpenJev 均可）；
+- ``"startlux"``：StartLux-Decision 原生协议（``POST {base}/v1/decisions``，
+  开源决策模型，v1.1 含 Instant/AutoThink 两形态；自托管 ``startlux-decide
+  serve`` 或托管端点均可，权重 CC BY-NC 4.0 非商业）。choice 答案带
+  ``none_probability``（无一选项合适的概率，官方建议 ≥0.2 视为决策空间外），
+  透出为输出字段；``think_mode``/``gate`` 等控制参数经 ``extra_body`` 传入；
+  端点由 ``api_base`` 字段或 ``STARTLUX_API_BASE`` 环境变量给出；
 - 自定义：``register_decision_provider(name, fn)``，``fn(**request)`` 返回
   ``{"choice", "confidence", "model", "raw"}``（测试与确定性流程用）；
 - ``"jevlike"``：本地打分器（开源替代，jevlike 仓，MIT）。``model`` 字段 =
@@ -257,6 +263,92 @@ def _provider_jev(*, question: Any, choices: list[dict], input: Any, items: Opti
             "raw": json.dumps(data, ensure_ascii=False)[:2000]}
 
 
+def _provider_startlux(*, question: Any, choices: list[dict], input: Any, items: Optional[list],
+                       api_base: Optional[str], api_key: Optional[str],
+                       model: Optional[str], timeout_secs: int,
+                       extra_body: Optional[dict] = None) -> dict:
+    """StartLux Decision 原生线协议：POST {base}/v1/decisions。
+
+    开源决策模型 StartLux-Decision（v1 起 Instant 单次前向，v1.1 增 AutoThink
+    不确定时先思考再读出；自托管 ``startlux-decide serve`` 或托管端点均可，
+    权重 CC BY-NC 4.0 非商业）。state + questions 形状与 jev/systemone 同族，
+    节点仍以 choice 型 question 表达（模型侧 noul=两选项、score=有序档位，
+    均可落进 choice 决策空间，节点契约不变）。choice 答案自带
+    ``none_probability``（列出的选项都不合适的概率，官方建议 ≥0.2 视为
+    无合适选项），透出为输出字段供 flow 分支。``think_mode`` / ``gate`` /
+    ``think_budget`` 等 StartLux 控制参数经节点 ``extra_body`` 原样并入。
+    """
+    base = str(api_base or os.environ.get("STARTLUX_API_BASE", "")).rstrip("/")
+    if not base:
+        raise DecisionError("startlux provider 需要 api_base 字段或 STARTLUX_API_BASE 环境变量")
+    key = str(api_key or os.environ.get("STARTLUX_API_KEY", ""))
+    criteria = {c["value"]: (c["description"] or c["value"]) for c in choices}
+    instructions = str(question or "Choose the best option.")
+    questions: dict = {}
+    if items is not None:
+        for i in range(len(items)):
+            questions[f"item_{i}"] = {"type": "choice", "instructions": instructions,
+                                      "criteria": criteria}
+        state = "\n".join(_render_payload(it) for it in items)
+    else:
+        state = _render_payload(input)
+        questions["decision"] = {"type": "choice", "instructions": instructions,
+                                 "criteria": criteria}
+    # allow_none 显式关死：none 不作为决策空间外的第三形态进 choice（会破坏
+    # 空间内校验）；「都不合适」信号一律走 none_probability（none_check 默认开）
+    body: dict = {"state": state, "questions": questions, "allow_none": False}
+    if model:
+        body["model"] = str(model)
+    if extra_body:
+        body.update(extra_body)
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    resp = requests.post(f"{base}/v1/decisions", headers=headers, json=body,
+                         timeout=timeout_secs)
+    if resp.status_code >= 400:
+        raise DecisionError(f"startlux 请求失败 {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
+        raise DecisionError(f"startlux 响应缺少 answers 对象: {str(data)[:200]}")
+
+    def _answer(name: str) -> dict:
+        answer = data["answers"].get(name)
+        if not isinstance(answer, dict) or "choice" not in answer:
+            raise DecisionError(f"startlux answers.{name} 缺少 choice: {str(data)[:200]}")
+        try:
+            confidence = float(answer.get("confidence", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise DecisionError(f"confidence 非数值: {answer.get('confidence')!r}") from exc
+        out = {"choice": str(answer["choice"]), "confidence": confidence}
+        none_p = answer.get("none_probability")
+        if none_p is not None:
+            try:
+                out["none_probability"] = float(none_p)
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    if items is not None:
+        results = []
+        for i in range(len(items)):
+            a = _answer(f"item_{i}")
+            entry = {"index": i, "choice": a["choice"], "confidence": a["confidence"]}
+            if "none_probability" in a:
+                entry["none_probability"] = a["none_probability"]
+            results.append(entry)
+        return {"results": results, "model": data.get("model"),
+                "raw": json.dumps(data, ensure_ascii=False)[:2000]}
+
+    a = _answer("decision")
+    out = {"choice": a["choice"], "confidence": a["confidence"],
+           "model": data.get("model"),
+           "raw": json.dumps(data, ensure_ascii=False)[:2000]}
+    if "none_probability" in a:
+        out["none_probability"] = a["none_probability"]
+    return out
+
+
 DecisionProvider = Callable[..., dict]
 
 # jevlike checkpoint 缓存：{resolved_path: (model, collator, device)}
@@ -330,6 +422,7 @@ def _provider_jevlike(*, question: Any, choices: list[dict], input: Any, items: 
 DECISION_PROVIDERS: dict[str, DecisionProvider] = {
     "llm": _provider_llm,
     "jev": _provider_jev,
+    "startlux": _provider_startlux,
     "jevlike": _provider_jevlike,
 }
 
@@ -353,13 +446,14 @@ class DecisionNode(Node):
     - ``choices``: 决策空间——字符串列表 / [{value, description}] / {值: 说明} 映射
     - ``input``: 待判定内容（文本或对象）；与 ``items`` 二选一
     - ``items``: 待判定内容列表（批量模式）
-    - ``provider``: ``llm``（默认）/ ``jev`` / ``jevlike`` / 自定义注册名
+    - ``provider``: ``llm``（默认）/ ``jev`` / ``startlux`` / ``jevlike`` / 自定义注册名
     - ``api_base`` / ``api_key`` / ``model``: 端点覆盖（llm 端点另有 provider
       bundle 与 LLM_* 环境变量回退；jev 端点另有 JEV_API_BASE/KEY；
+      startlux 端点另有 STARTLUX_API_BASE/KEY；
       jevlike 的 model = checkpoint 路径）
-    - ``extra_body``: 附加请求体字段（dict，仅 llm provider 生效，原样合并进
-      /chat/completions 请求体——如 ``{"reasoning_effort": "low"}`` 控制始终
-      思考模型的思考档位）
+    - ``extra_body``: 附加请求体字段（dict，仅 llm / startlux provider 生效，
+      原样合并进请求体——如 ``{"reasoning_effort": "low"}`` 控制始终思考模型
+      的思考档位，或 startlux 的 ``{"think_mode": "always", "gate": 0.7}``）
     - ``min_confidence``: 置信阈值（批量模式逐项生效）；低于时该项
       ``low_confidence=True`` 并按 ``on_low_confidence`` 处理：
       ``passthrough``（默认，仅标记）/ ``default``（取 ``default_choice``）/
@@ -368,7 +462,10 @@ class DecisionNode(Node):
 
     输出：单条 ``{"choice", "confidence", "provider", "model",
     "low_confidence", "raw", "dry_run"}``；批量 ``{"results", "provider",
-    "model", "low_confidence", "raw", "dry_run"}``。
+    "model", "low_confidence", "raw", "dry_run"}``。provider 给出
+    ``none_probability`` 时（startlux）附加透出——单条在顶层、批量逐项携带，
+    语义为「列出的选项都不合适」的概率（官方建议 ≥0.2 视为决策空间外），
+    ``min_confidence`` 门控只看 confidence，不看它。
     """
 
     node_type: ClassVar[str] = "decision"
@@ -429,7 +526,7 @@ class DecisionNode(Node):
                       api_key=ev(self.api_key),
                       model=ev(self.model),
                       timeout_secs=self.timeout_secs)
-        if provider_name == "llm" and self.extra_body is not None:
+        if provider_name in ("llm", "startlux") and self.extra_body is not None:
             kwargs["extra_body"] = ev(self.extra_body)
         out = fn(**kwargs)
 
@@ -440,10 +537,13 @@ class DecisionNode(Node):
                 f"置信度 {confidence:.2f} 低于阈值 {self.min_confidence}（choice={choice!r}）")
         if low and self.on_low_confidence == "default":
             choice = self._default(execution)
-        return {"choice": choice, "confidence": confidence,
-                "provider": provider_name, "model": str(out.get("model") or ""),
-                "low_confidence": low, "raw": str(out.get("raw") or "")[:2000],
-                "dry_run": False}
+        result = {"choice": choice, "confidence": confidence,
+                  "provider": provider_name, "model": str(out.get("model") or ""),
+                  "low_confidence": low, "raw": str(out.get("raw") or "")[:2000],
+                  "dry_run": False}
+        if out.get("none_probability") is not None:
+            result["none_probability"] = out["none_probability"]
+        return result
 
     def _execute_batch(self, execution: Any, choices: list[dict],
                        provider_name: str, dry: bool, ev) -> dict:
@@ -469,7 +569,7 @@ class DecisionNode(Node):
                       api_key=ev(self.api_key),
                       model=ev(self.model),
                       timeout_secs=self.timeout_secs)
-        if provider_name == "llm" and self.extra_body is not None:
+        if provider_name in ("llm", "startlux") and self.extra_body is not None:
             kwargs["extra_body"] = ev(self.extra_body)
         out = fn(**kwargs)
         entries = out.get("results")
@@ -491,8 +591,11 @@ class DecisionNode(Node):
             if low and self.on_low_confidence == "default":
                 choice = self._default(execution)
             any_low = any_low or low
-            results.append({"index": i, "choice": choice,
-                            "confidence": confidence, "low_confidence": low})
+            result = {"index": i, "choice": choice,
+                      "confidence": confidence, "low_confidence": low}
+            if entry.get("none_probability") is not None:
+                result["none_probability"] = entry["none_probability"]
+            results.append(result)
         return {"results": results, "provider": provider_name,
                 "model": str(out.get("model") or ""),
                 "low_confidence": any_low, "raw": str(out.get("raw") or "")[:2000],

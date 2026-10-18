@@ -1,4 +1,4 @@
-"""DecisionNode：决策空间归一 + llm/jev provider + 置信度门控 + dry-run + 构建期校验。"""
+"""DecisionNode：决策空间归一 + llm/jev/startlux provider + 置信度门控 + dry-run + 构建期校验。"""
 from __future__ import annotations
 
 import json
@@ -101,11 +101,86 @@ def openai_stub():
     stub.server.server_close()
 
 
+class StubStartLux:
+    """StartLux Decision 原生协议端点：POST /v1/decisions。"""
+
+    def __init__(self, choice: str = "route_a", confidence: float = 0.93,
+                 none_probability: "float | None" = 0.01):
+        self.choice = choice
+        self.confidence = confidence
+        self.none_probability = none_probability
+        self.status = 200
+        self.per_item: "list | None" = None  # [(choice, confidence, none_p), ...] 逐项覆盖
+        self.omit: "set[str] | None" = None  # answers 里刻意缺席的 question 名
+        self.last_body: dict = {}
+        self.auth: str = ""
+        self.path: str = ""
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                outer.path = self.path
+                outer.auth = self.headers.get("Authorization", "")
+                outer.last_body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if outer.status >= 400:
+                    data = json.dumps({"error": "boom"}).encode()
+                    self.send_response(outer.status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                answers = {}
+                for name in outer.last_body.get("questions", {}):
+                    if outer.omit and name in outer.omit:
+                        continue
+                    idx = int(name.split("_")[-1]) if name.startswith("item_") else None
+                    if outer.per_item is not None and idx is not None:
+                        c, conf, none_p = outer.per_item[idx]
+                        answers[name] = {"choice": c, "confidence": conf,
+                                         "probabilities": {c: conf},
+                                         "none_probability": none_p}
+                        continue
+                    answer = {"choice": outer.choice,
+                              "probabilities": {outer.choice: outer.confidence},
+                              "confidence": outer.confidence}
+                    if outer.none_probability is not None:
+                        answer["none_probability"] = outer.none_probability
+                    answers[name] = answer
+                data = json.dumps({
+                    "model": "startlux-decision-4b-instant",
+                    "answers": answers,
+                    "usage": {"input_tokens": 290, "output_tokens": 144},
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
 @pytest.fixture
 def jev_stub(monkeypatch):
     stub = StubJev()
     monkeypatch.setenv("JEV_API_BASE", stub.base)
     monkeypatch.setenv("JEV_API_KEY", "jev-secret")
+    yield stub
+    stub.server.shutdown()
+    stub.server.server_close()
+
+
+@pytest.fixture
+def startlux_stub(monkeypatch):
+    stub = StubStartLux()
+    monkeypatch.setenv("STARTLUX_API_BASE", stub.base)
+    monkeypatch.setenv("STARTLUX_API_KEY", "slx-secret")
     yield stub
     stub.server.shutdown()
     stub.server.server_close()
@@ -206,6 +281,100 @@ def test_jev_provider_requires_endpoint(monkeypatch):
     monkeypatch.delenv("JEV_API_BASE", raising=False)
     node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="jev")
     with pytest.raises(DecisionError, match="JEV_API_BASE"):
+        node.execute(FakeExecution())
+
+
+def test_startlux_provider(startlux_stub):
+    node = DecisionNode(id="t", question="路由到哪个队列", provider="startlux",
+                        choices=[{"value": "route_a", "description": "普通队列"},
+                                 {"value": "route_b"}],
+                        input={"text": "工单内容"}, model="startlux-decision-4b-instant")
+    out = node.execute(FakeExecution())
+    assert out["choice"] == "route_a"
+    assert out["confidence"] == 0.93
+    assert out["none_probability"] == 0.01
+    assert out["provider"] == "startlux"
+    assert out["model"] == "startlux-decision-4b-instant"
+    assert out["low_confidence"] is False
+    assert startlux_stub.path.endswith("/v1/decisions")
+    assert startlux_stub.auth == "Bearer slx-secret"
+    body = startlux_stub.last_body
+    assert body["allow_none"] is False
+    assert body["model"] == "startlux-decision-4b-instant"
+    q = body["questions"]["decision"]
+    assert q["type"] == "choice"
+    assert q["instructions"] == "路由到哪个队列"
+    assert q["criteria"] == {"route_a": "普通队列", "route_b": "route_b"}
+    assert "工单内容" in body["state"]
+
+
+def test_startlux_provider_env_endpoint(startlux_stub):
+    """不传 api_base，走 STARTLUX_API_BASE 环境变量回退（fixture 已设）。"""
+    node = DecisionNode(id="t", choices=["route_a", "route_b"], input="x",
+                        provider="startlux")
+    out = node.execute(FakeExecution())
+    assert out["choice"] == "route_a"
+    assert startlux_stub.path.endswith("/v1/decisions")
+
+
+def test_startlux_provider_requires_endpoint(monkeypatch):
+    monkeypatch.delenv("STARTLUX_API_BASE", raising=False)
+    node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="startlux")
+    with pytest.raises(DecisionError, match="STARTLUX_API_BASE"):
+        node.execute(FakeExecution())
+
+
+def test_startlux_provider_http_error(startlux_stub):
+    startlux_stub.status = 503
+    node = DecisionNode(id="t", choices=["a", "b"], input="x", provider="startlux")
+    with pytest.raises(DecisionError, match="startlux 请求失败 503"):
+        node.execute(FakeExecution())
+
+
+def test_startlux_none_probability_absent(startlux_stub):
+    startlux_stub.none_probability = None
+    node = DecisionNode(id="t", choices=["route_a", "route_b"], input="x",
+                        provider="startlux")
+    out = node.execute(FakeExecution())
+    assert out["choice"] == "route_a"
+    assert "none_probability" not in out  # 服务端未给 → 输出不带该键（向后兼容形状）
+
+
+def test_startlux_extra_body_passthrough(startlux_stub):
+    node = DecisionNode(id="t", choices=["route_a", "route_b"], input="x",
+                        provider="startlux",
+                        extra_body={"think_mode": "always", "gate": 0.7})
+    node.execute(FakeExecution())
+    body = startlux_stub.last_body
+    assert body["think_mode"] == "always"
+    assert body["gate"] == 0.7
+
+
+def test_startlux_provider_batch(startlux_stub):
+    startlux_stub.per_item = [("keep", 0.95, 0.005), ("drop", 0.4, 0.35)]
+    node = DecisionNode(id="t", question="是否可交互", provider="startlux",
+                        choices={"keep": "可交互元素", "drop": "噪声"},
+                        items=["BUTTON \"提交\" @e1", "TEXT 装饰横幅 @e2"],
+                        min_confidence=0.8)
+    out = node.execute(FakeExecution())
+    assert [r["choice"] for r in out["results"]] == ["keep", "drop"]
+    assert out["results"][0]["none_probability"] == 0.005
+    assert out["results"][1]["none_probability"] == 0.35
+    assert out["results"][1]["low_confidence"] is True
+    assert out["low_confidence"] is True
+    qs = startlux_stub.last_body["questions"]
+    assert set(qs) == {"item_0", "item_1"}
+    assert all(q["type"] == "choice" for q in qs.values())
+    assert qs["item_0"]["criteria"] == {"keep": "可交互元素", "drop": "噪声"}
+    assert startlux_stub.last_body["allow_none"] is False
+
+
+def test_startlux_provider_missing_answer(startlux_stub):
+    # 服务端 answers 缺某一项（畸形响应）→ 明确报错指向缺失的 question 名
+    startlux_stub.omit = {"item_1"}
+    node = DecisionNode(id="t", choices=["keep", "drop"], items=["a", "b"],
+                        provider="startlux")
+    with pytest.raises(DecisionError, match=r"answers\.item_1 缺少 choice"):
         node.execute(FakeExecution())
 
 
