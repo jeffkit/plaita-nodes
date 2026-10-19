@@ -129,6 +129,24 @@ def test_capture_config_error_executes_once(monkeypatch):
     assert isinstance(exc.__cause__, CaptureConfigError)
 
 
+def test_invalid_action_executes_once(tmp_path, monkeypatch):
+    """非法 action 是确定性 ValueError：retry_times=2 仍只执行 1 次。"""
+    from plaita_nodes.rate_limit import RateLimitNode
+
+    calls = {"n": 0}
+    original = RateLimitNode.execute
+
+    def counted(self, execution):
+        calls["n"] += 1
+        return original(self, execution)
+
+    monkeypatch.setattr(RateLimitNode, "execute", counted)
+    exc = _run_with_retries("rate_limit", action="no-such-action",
+                            key="k", store_dir=str(tmp_path))
+    assert calls["n"] == 1
+    assert isinstance(exc.__cause__, ValueError)
+
+
 def test_deterministic_error_types_are_not_retryable():
     """分类表覆盖的异常类型：同时保留原 RuntimeError 身份。"""
     cases = [

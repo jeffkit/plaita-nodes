@@ -14,10 +14,10 @@
 | A2R7-04 确定性错误被重试 | 新增 `_retry`：`DeterministicError`（ValueError mixin，保留 RuntimeError 身份）+ HTTP 状态码分类表（4xx 除 408/425/429 不重试；5xx/限流重试） | 4 failed / 1 passed：`retry_times=2` 下 LLM 401 / API 401 请求计数 3（应 1） | 全部计数 = 1；503 仍 3 次 |
 | A2R7-05 计时参数三态 | 新增 `_timeouts`：gate/capture `timeout_secs`、api/generic `timeout_ms` 字面量构造期具名拒绝；gate DSL 表达式求值后、spawn 前拒绝 | 17 failed / 2 passed：0/负值/布尔全部构造成功 | 0/-1/NaN/inf/bool 全部 `ValidationError`；表达式 0 在 Popen 前 `ValueError` |
 
-- 定向正控：**39 passed**（`tests/test_a2r8_webhook_redaction.py`、
+- 定向正控：**40 passed**（`tests/test_a2r8_webhook_redaction.py`、
   `tests/test_a2r8_cancel.py`、`tests/test_a2r7_retry_classification.py`、
   `tests/test_a2r7_timeout_matrix.py`、`tests/test_log_redaction.py`）
-- 全量：**283 passed / 2 skipped**（基线 249 passed / 2 skipped，+34 新用例）
+- 全量：**284 passed / 2 skipped**（基线 249 passed / 2 skipped，+35 新用例）
 - 探针复核（修复后）：r7 retry matrix 六项全部 `executions=1`/`requests=1`；
   r8 cancel 探针 `alive_after_flow_return+0.9s=False`、
   `late_side_effect_after_flow_timeout=False`；r8 notify 探针
@@ -162,10 +162,10 @@ python3 -m pytest -q \
   tests/test_a2r8_webhook_redaction.py tests/test_a2r8_cancel.py \
   tests/test_a2r7_retry_classification.py tests/test_a2r7_timeout_matrix.py \
   tests/test_log_redaction.py
-# -> 39 passed
+# -> 40 passed
 
 python3 -m pytest -q
-# -> 283 passed / 2 skipped
+# -> 284 passed / 2 skipped
 ```
 
 ## §7 未纳入本轮（台账既有项）
