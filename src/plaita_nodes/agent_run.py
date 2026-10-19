@@ -29,6 +29,7 @@ worker 宿主上免审批执行，只有沙箱才有 VM 边界。流式辅助路
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -119,6 +120,122 @@ def _run_lock_key(workspace: str, run_key: Optional[str] = None) -> str:
     return f"{ws}#{run_key}" if run_key else ws
 
 
+try:  # POSIX：跨进程串行化。Windows 无 fcntl，退化为进程内 RLock。
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - 平台差异
+    _fcntl = None
+
+_GUARD_LOCKS: Dict[str, threading.RLock] = {}
+_GUARD_LOCKS_LOCK = threading.Lock()
+_GUARD_DEPTH = threading.local()
+
+
+def _guard_path(lock_key: str) -> str:
+    """与遗言锁同目录的 guard 文件（不污染 workspace / git 工作区）。"""
+    from agentproc.run_lock import lock_path_for
+
+    path = lock_path_for(lock_key)
+    return str(path.with_name(path.name + ".guard"))
+
+
+def _guard_rlock(guard_path: str) -> threading.RLock:
+    with _GUARD_LOCKS_LOCK:
+        lock = _GUARD_LOCKS.get(guard_path)
+        if lock is None:
+            lock = _GUARD_LOCKS[guard_path] = threading.RLock()
+        return lock
+
+
+@contextlib.contextmanager
+def _run_lock_guard(lock_key: str):
+    """把同一遗言锁键上的 preflight / 写锁 / 清锁串行化（A2R12-01/02）。
+
+    竞态根因是「check → act」之间没有互斥：两个 stream 调用可同时越过
+    preflight，后写者覆盖先写者的锁；`cleanup_stale_run` 的「读记录 → 判
+    pid → unlink」之间也可能插入一次新锁写入，慢清理者随后删掉新锁。
+
+    进程内用可重入 RLock（console 多线程共享 ``host-<pid>`` 键），跨进程用
+    guard 文件的 ``flock``。可重入是必需的：``recursive_stream_turn`` 持锁
+    跨 preflight→Popen→write，而 ``preflight_workspace`` 自身也要在直接调用
+    时持锁（keeper reaper / 非流式路径）。
+    """
+    guard_path = _guard_path(lock_key)
+    depths = getattr(_GUARD_DEPTH, "depths", None)
+    if depths is None:
+        depths = _GUARD_DEPTH.depths = {}
+    if depths.get(guard_path):
+        depths[guard_path] += 1
+        try:
+            yield
+        finally:
+            depths[guard_path] -= 1
+        return
+
+    with _guard_rlock(guard_path):
+        try:
+            os.makedirs(os.path.dirname(guard_path), exist_ok=True)
+            fh = open(guard_path, "a+b")
+        except OSError as exc:  # 锁目录不可写：保底进程内互斥，不阻断开工
+            _log.warning("遗言锁 guard 文件不可用（仅进程内互斥）：%s: %s",
+                         guard_path, exc)
+            fh = None
+        try:
+            if fh is not None and _fcntl is not None:
+                try:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                except OSError as exc:  # pragma: no cover - 文件系统不支持
+                    _log.warning("遗言锁 guard flock 失败（仅进程内互斥）：%s: %s",
+                                 guard_path, exc)
+            depths[guard_path] = 1
+            try:
+                yield
+            finally:
+                depths.pop(guard_path, None)
+                if fh is not None and _fcntl is not None:
+                    try:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                    except OSError:  # pragma: no cover - 关闭 fd 即释放
+                        pass
+        finally:
+            if fh is not None:
+                fh.close()
+
+
+def _clear_run_lock_owned(lock_key: str, pid: int) -> bool:
+    """只清归属 ``pid`` 的遗言锁；兄弟 run 的锁原样保留（A2R12-01）。
+
+    旧路径的 ``clear_run_lock`` 无条件 unlink：先结束者会删掉已由兄弟 run
+    重建的锁，留下「活进程 + 无锁」——下一次 preflight 看到 clean 即放行
+    并发写。#19 的终止语义不变：调用方仍在确认进程终态后才走到这里。
+    """
+    from agentproc import run_lock as _run_lock
+
+    with _run_lock_guard(lock_key):
+        path = _run_lock.lock_path_for(lock_key)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            owner = int(record["pid"])
+        except FileNotFoundError:
+            return True  # 已无锁可清
+        except (OSError, ValueError, TypeError, KeyError):
+            _log.warning("遗言锁不可读，保留给下一次 preflight 处置：%s", path)
+            return False
+        if owner != int(pid):
+            _log.warning(
+                "遗言锁归属不符，拒绝清除：lock=%s expected_pid=%s owner_pid=%s",
+                path, pid, owner)
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            _log.warning("遗言锁清除失败（保留给下一次 preflight）：%s: %s",
+                         path, exc)
+            return False
+        return True
+
+
 def preflight_workspace(workspace: str, *, run_key: Optional[str] = None,
                         grace_secs: float = 10.0) -> dict:
     """kill-before-start：开工前清理同 workspace 的孤儿 agent 进程组（G3）。
@@ -131,11 +248,16 @@ def preflight_workspace(workspace: str, *, run_key: Optional[str] = None,
 
     ``run_key`` 非空时锁键带 run 作用域：只清本 run 的锁，同 workspace 其它
     run 的 live agent 与锁一律不碰。
+
+    「读记录 → 判 pid → unlink」在 ``_run_lock_guard`` 内执行，与同一键上的
+    spawn/write/clear 互斥，清理者不会用旧快照删掉重建后的新锁（A2R12-02）。
     """
     from agentproc.run_lock import RunLockBusy, cleanup_stale_run
 
+    lock_key = _run_lock_key(workspace, run_key)
     try:
-        info = cleanup_stale_run(_run_lock_key(workspace, run_key), grace_secs=grace_secs)
+        with _run_lock_guard(lock_key):
+            info = cleanup_stale_run(lock_key, grace_secs=grace_secs)
     except RunLockBusy as exc:
         raise AgentRunError(f"workspace 孤儿清场未完成，拒绝开工：{exc}") from exc
     if info.get("action") in ("killed", "stale"):
@@ -731,7 +853,6 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     # console 进程同 workspace 互相当孤儿杀；需要跨重启清场时由宿主显式传稳定 run_key。
     scope = run_key or f"host-{os.getpid()}"
     lock_key = _run_lock_key(workspace_abs, scope)
-    preflight_workspace(workspace_abs, run_key=scope)
 
     register_recursive_direct()
     agent = resolve_agent(profile)
@@ -746,12 +867,17 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     # 子进程必须拿到 provider 凭证 env（否则无凭证运行得到空回复）；宿主
     # 其余环境经公共层白名单过滤，不整份继承（见 _subprocess_env）
     proc_env = build_subprocess_env(env_extra)
-    # 独立进程组：超时 killpg 连 agent 拉起的子树一起清（同 capture/gate 形态）
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, cwd=workspace, env=proc_env,
-                            start_new_session=True)
     from agentproc import run_lock as _run_lock
-    _run_lock.write_run_lock(lock_key, proc.pid, argv)
+    # A2R12-01/02：preflight 的「查」与 spawn 后的「写锁」必须在同一临界区。
+    # 否则两个调用都能越过 preflight（第二个看不到第一个尚未落盘的锁），后
+    # 写者覆盖先写者的遗言锁；stale 清理也可能用旧快照删掉随后重建的新锁。
+    with _run_lock_guard(lock_key):
+        preflight_workspace(workspace_abs, run_key=scope)
+        # 独立进程组：超时 killpg 连 agent 拉起的子树一起清（同 capture/gate 形态）
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, cwd=workspace, env=proc_env,
+                                start_new_session=True)
+        _run_lock.write_run_lock(lock_key, proc.pid, argv)
     try:
         yield from _stream_turn_body(proc, timeout_secs)
     finally:
@@ -760,7 +886,9 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
         # 反过来（旧实现）留下「进程仍活 + 锁已删」，下一次 preflight 看到
         # clean 即放行 → 同 workspace 无锁并发写（#19）。
         if _terminate_stream_process(proc):
-            _run_lock.clear_run_lock(lock_key)
+            # 只清归属本 proc 的锁：兄弟 run 可能已在本锁被判 stale 后重建
+            # 新锁，无条件 unlink 会再次留下「活进程 + 无锁」（A2R12-01）。
+            _clear_run_lock_owned(lock_key, proc.pid)
         else:
             _log.error(
                 "流式 agent pid=%s 未能确认终止，保留遗言锁 %s（workspace=%s）"

@@ -1,0 +1,237 @@
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+__ TestConcurrentStreamTurnGate.test_concurrent_stream_turns_second_is_gated ___
+
+self = <test_agent_run_lock_races.TestConcurrentStreamTurnGate object at 0x1079dd090>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_concurrent_stream_turns_s0')
+workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_concurrent_stream_turns_s0/ws')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af490>
+
+    def test_concurrent_stream_turns_second_is_gated(
+            self, agent_config_repo, workspace, monkeypatch):
+        """A/B 同时开工：A 落锁后 B 被 preflight 拒绝，B 的 agent 零 spawn。"""
+        _register_stub(agent_config_repo, "race-a", 3)
+        _register_stub(agent_config_repo, "race-b", 1)
+    
+        real_popen = subprocess.Popen
+        a_in_popen = threading.Event()
+        spawned: list[str] = []
+        spawned_lock = threading.Lock()
+    
+        def slow_popen(*args, **kwargs):
+            argv0 = os.path.basename(args[0][0]) if args and args[0] else ""
+            with spawned_lock:
+                spawned.append(argv0)
+            proc = real_popen(*args, **kwargs)
+            if argv0.startswith("stub-race-a"):
+                a_in_popen.set()
+                # 放大 Popen→write_run_lock 窗口：无互斥时 B 能在此窗口内也越过
+                # preflight 并再 spawn 一个 agent。
+                time.sleep(0.5)
+            return proc
+    
+        monkeypatch.setattr(agent_run_mod.subprocess, "Popen", slow_popen)
+    
+        results: dict[str, dict] = {}
+    
+        def run(name: str) -> None:
+            try:
+                events = list(recursive_stream_turn(
+                    "hi", workspace=str(workspace), profile=name,
+                    timeout_secs=30, run_key="race"))
+                results[name] = {"ok": events[-1].get("ok")}
+            except BaseException as exc:  # noqa: BLE001 - 断言失败也要收集
+                results[name] = {"error": exc}
+    
+        t_a = threading.Thread(target=run, args=("race-a",), daemon=True)
+        t_a.start()
+        _wait(a_in_popen, 10, "A 未进入 Popen（装置未就绪）")
+    
+        t_b = threading.Thread(target=run, args=("race-b",), daemon=True)
+        t_b.start()
+        t_a.join(timeout=20)
+        t_b.join(timeout=20)
+    
+        assert results["race-a"].get("ok") is True, results["race-a"]
+>       assert isinstance(results["race-b"].get("error"), AgentRunError), (
+            f"第二个 stream 未被闸：{results['race-b']}")
+E       AssertionError: 第二个 stream 未被闸：{'ok': True}
+E       assert False
+E        +  where False = isinstance(None, AgentRunError)
+E        +    where None = <built-in method get of dict object at 0x107af59c0>('error')
+E        +      where <built-in method get of dict object at 0x107af59c0> = {'ok': True}.get
+
+tests/test_agent_run_lock_races.py:139: AssertionError
+_________ TestClearRunLockOwnership.test_late_clear_keeps_sibling_lock _________
+
+self = <test_agent_run_lock_races.TestClearRunLockOwnership object at 0x1079dd450>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0')
+workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0/ws')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af5c0>
+
+    def test_late_clear_keeps_sibling_lock(
+            self, agent_config_repo, workspace, monkeypatch):
+        """A 收尾时锁已由 B 重建：只清自己的 pid，B 的锁与进程都存活。"""
+        pidfile_b = workspace / "b.pid"
+        _register_stub(agent_config_repo, "clear-a", 0)
+        _register_stub(agent_config_repo, "clear-b", 30, pidfile_b)
+    
+        real_popen = subprocess.Popen
+        pids: dict[str, int] = {}
+    
+        def recording_popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            name = os.path.basename(args[0][0]) if args and args[0] else ""
+            pids[name] = proc.pid
+            return proc
+    
+        monkeypatch.setattr(agent_run_mod.subprocess, "Popen", recording_popen)
+    
+        a_finalizing = threading.Event()
+        release_a = threading.Event()
+        real_terminate = agent_run_mod._terminate_stream_process
+    
+        def controlled_terminate(proc):
+            if proc.pid == pids.get("stub-clear-a.sh"):
+                a_finalizing.set()
+                # 卡在「进程已死、锁未清」窗口：让 B 完成 stale 清理 + 重建锁。
+                assert release_a.wait(15), "unblock late A finalizer"
+            return real_terminate(proc)
+    
+        monkeypatch.setattr(agent_run_mod, "_terminate_stream_process",
+                            controlled_terminate)
+    
+        errors: dict[str, BaseException] = {}
+    
+        def run_a() -> None:
+            try:
+                list(recursive_stream_turn(
+                    "hi", workspace=str(workspace), profile="clear-a",
+                    timeout_secs=30, run_key="race"))
+            except BaseException as exc:  # noqa: BLE001
+                errors["a"] = exc
+    
+        lock_key = _run_lock_key(str(workspace), "race")
+        lock_file = run_lock.lock_path_for(lock_key)
+    
+        t_a = threading.Thread(target=run_a, daemon=True)
+        t_a.start()
+        _wait(a_finalizing, 15, "A 未进入收尾窗口")
+        a_pid = pids["stub-clear-a.sh"]
+        record = json.loads(lock_file.read_text(encoding="utf-8"))
+        assert record["pid"] == a_pid
+        assert not _alive(a_pid), "装置要求 A 的 agent 已死（锁成为 stale）"
+    
+        gen_b = recursive_stream_turn(
+            "hi", workspace=str(workspace), profile="clear-b",
+            timeout_secs=30, run_key="race")
+        b_pid: int | None = None
+        try:
+            assert next(gen_b) == {"type": "line", "text": "started"}
+            b_pid = int(pidfile_b.read_text().strip())
+            record = json.loads(lock_file.read_text(encoding="utf-8"))
+            assert record["pid"] == b_pid, "B 未能重建自己的遗言锁"
+    
+            release_a.set()
+            t_a.join(timeout=15)
+            assert not t_a.is_alive()
+            assert "a" not in errors, errors
+    
+>           assert lock_file.exists(), (
+                "A 的迟到收尾把 B 重建的锁删了（B 的 agent 仍存活）")
+E               AssertionError: A 的迟到收尾把 B 重建的锁删了（B 的 agent 仍存活）
+E               assert False
+E                +  where False = exists()
+E                +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0/locks/69bb878148f8d1780cc54ef326e4eae2.json').exists
+
+tests/test_agent_run_lock_races.py:216: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0/ws run_key=race action=stale pid=52840 command=
+_____ TestStaleCleanupRace.test_stale_cleanup_does_not_delete_rebuilt_lock _____
+
+self = <test_agent_run_lock_races.TestStaleCleanupRace object at 0x1079dd590>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0')
+workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/ws')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107ae4710>
+
+    def test_stale_cleanup_does_not_delete_rebuilt_lock(
+            self, agent_config_repo, workspace, monkeypatch):
+        """并发 preflight：慢清理者的迟到 unlink 不得删除快者重建的新锁。"""
+        _register_stub(agent_config_repo, "stale-c", 3)
+        lock_key = _run_lock_key(str(workspace), "race")
+        lock_file = run_lock.lock_path_for(lock_key)
+    
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        run_lock.write_run_lock(lock_key, dead.pid, ["true"], spawner=os.getpid())
+        assert lock_file.exists()
+    
+        real_alive = run_lock._pid_alive
+        first_inside = threading.Event()
+        release_slow = threading.Event()
+        calls = {"n": 0}
+        calls_lock = threading.Lock()
+    
+        def blocking_alive(pid):
+            with calls_lock:
+                calls["n"] += 1
+                n = calls["n"]
+            if n == 1 and pid == dead.pid:
+                first_inside.set()
+                assert release_slow.wait(15), "unblock slow preflight"
+            return real_alive(pid)
+    
+        monkeypatch.setattr(run_lock, "_pid_alive", blocking_alive)
+    
+        slow: dict = {}
+    
+        def slow_preflight() -> None:
+            slow.update(preflight_workspace(str(workspace), run_key="race"))
+    
+        t_slow = threading.Thread(target=slow_preflight, daemon=True)
+        t_slow.start()
+        _wait(first_inside, 10, "慢 preflight 未进入 pid 探测")
+    
+        fast_lock_written = threading.Event()
+        fast_errors: dict[str, BaseException] = {}
+    
+        def fast_turn() -> None:
+            try:
+                for event in recursive_stream_turn(
+                        "hi", workspace=str(workspace), profile="stale-c",
+                        timeout_secs=30, run_key="race"):
+                    if event["type"] == "line":
+                        # 锁在首个 line 之前已落盘（Popen→write→yield）
+                        fast_lock_written.set()
+            except BaseException as exc:  # noqa: BLE001
+                fast_errors["e"] = exc
+    
+        t_fast = threading.Thread(target=fast_turn, daemon=True)
+        t_fast.start()
+    
+        # 修复后 fast 被 guard 挡在 preflight 之前；修复前它会在慢清理者暂停
+        # 期间完成 unlink→spawn→write，随后被慢者的迟到 unlink 删掉。
+        fast_lock_written.wait(timeout=1.0)
+        release_slow.set()
+        t_slow.join(timeout=15)
+        assert not t_slow.is_alive()
+        assert slow.get("reason") == "pid-gone", slow
+        _wait(fast_lock_written, 15, "快 run 在慢 preflight 结束后仍未落锁")
+        assert "e" not in fast_errors, fast_errors
+    
+>       assert lock_file.exists(), (
+            "慢 preflight 的迟到 unlink 删除了快 run 重建的新锁（活进程无锁）")
+E       AssertionError: 慢 preflight 的迟到 unlink 删除了快 run 重建的新锁（活进程无锁）
+E       assert False
+E        +  where False = exists()
+E        +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/locks/acdd6bc6164bc47d114682cb0d735f2b.json').exists
+
+tests/test_agent_run_lock_races.py:298: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/ws run_key=race action=stale pid=52844 command=
+WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/ws run_key=race action=stale pid=52844 command=
+=========================== short test summary info ============================
+FAILED tests/test_agent_run_lock_races.py::TestConcurrentStreamTurnGate::test_concurrent_stream_turns_second_is_gated
+FAILED tests/test_agent_run_lock_races.py::TestClearRunLockOwnership::test_late_clear_keeps_sibling_lock
+FAILED tests/test_agent_run_lock_races.py::TestStaleCleanupRace::test_stale_cleanup_does_not_delete_rebuilt_lock
+3 failed in 4.26s
