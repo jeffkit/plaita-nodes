@@ -130,7 +130,10 @@ JSON 用法示例（agentrun + 模板表达式）：
   ```
 
   `sessions.json` 为 `{execution_id: {"session_id": ..., "node_id": ...}}` 映射，
-  由调用方挂起后落盘；事件发布（`replied`/`timeout`）后对应条目自动移除。
+  由调用方挂起后落盘；poller **每轮重读**该文件（启动后新增的挂起 session
+  下一轮即可见），事件发布成功后只按已发布键增量删除条目并原子替换文件
+  （并发追加的条目不会被覆盖）。发布的 `hitl_reply` 带 `correlation_id=execution_id`
+  （与挂起订阅绑定对齐，`EventFilter` 据此放行）。
   `--bus memory` 仅限调试——事件只发布在 poller 进程内，没有消费者；生产走 redis。
 
 ## 开发

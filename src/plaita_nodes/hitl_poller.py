@@ -16,8 +16,10 @@ session 映射文件（JSON）：``{execution_id: {"session_id": ..., "node_id":
         --bus redis://127.0.0.1:6379/0 \
         [--interval 5]
 
-bus 协议：发布事件 ``hitl_reply``，data = {"status": "replied", "replies": [...],
-"session_id": ...}；session 显示 timeout 时发布 {"status": "timeout"}。
+bus 协议：发布事件 ``hitl_reply``，``correlation_id=execution_id``（与挂起时
+注册的订阅绑定对齐，plaita#221 语义——EventFilter 入口会丢弃无 correlation_id
+的事件），data = {"status": "replied", "replies": [...], "session_id": ...}；
+session 显示 timeout 时发布 {"status": "timeout"}。
 """
 from __future__ import annotations
 
@@ -135,9 +137,12 @@ def _drop_published_sessions(path: Path, execution_ids: list[str]) -> None:
         _write_sessions_atomic(path, current)
 
 
-def _publish(bus, data: dict) -> None:
+def _publish(bus, execution_id: str, data: dict) -> None:
     async def _run():
-        await bus.publish(EVENT_TYPE, **data)
+        # correlation_id 必须走关键字参数：RedisEventBus 在 **kwargs 里 pop 它
+        # 写进 Event.correlation_id；缺了它，EventFilter 入口直接丢弃事件，
+        # 挂起订阅的 execution_id 匹配也必然不命中（pn#10）。
+        await bus.publish(EVENT_TYPE, correlation_id=execution_id, **data)
 
     # 单条发布在独立事件循环里完成（与任何总线实现的 async publish 契约一致）。
     asyncio.run(_run())
@@ -154,7 +159,7 @@ def poll_round(sessions_path: Path, hitl_url: str, bus) -> list[dict]:
         execution_id, data = event["execution_id"], event["data"]
         print(f"  📨 {execution_id} → {data.get('status')}")
         try:
-            _publish(bus, data)
+            _publish(bus, execution_id, data)
         except Exception as exc:  # noqa: BLE001 — 单条失败不杀常驻进程，下轮重试
             print(f"⚠️ 发布 {EVENT_TYPE} 失败（{execution_id}）：{exc}",
                   file=sys.stderr)

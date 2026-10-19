@@ -1,0 +1,103 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_____________________ test_publish_carries_correlation_id ______________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x112492ea0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4037/test_publish_carries_correlati0')
+
+    def test_publish_carries_correlation_id(monkeypatch, tmp_path):
+        """发布调用必须把 execution_id 作为 correlation_id 关键字参数带上。"""
+        sessions_path = tmp_path / "sessions.json"
+        sessions_path.write_text(json.dumps({
+            "exec-a": {"session_id": "sess-a"},
+        }), encoding="utf-8")
+    
+        bus = _RecordingBus()
+        _run_one_round(monkeypatch, sessions_path, bus)
+    
+>       assert bus.publishes == [(
+            EVENT_TYPE,
+            {
+                "status": "replied",
+                "replies": ["同意"],
+                "session_id": "sess-a",
+                "correlation_id": "exec-a",
+            },
+        )]
+E       AssertionError: assert [('hitl_reply...': 'sess-a'})] == [('hitl_reply...': 'exec-a'})]
+E         
+E         At index 0 diff: ('hitl_reply', {'status': 'replied', 'replies': ['同意'], 'session_id': 'sess-a'}) != ('hitl_reply', {'status': 'replied', 'replies': ['同意'], 'session_id': 'sess-a', 'correlation_id': 'exec-a'})
+E         Use -v to get more diff
+
+tests/test_issue10_hitl_reply_correlation.py:109: AssertionError
+----------------------------- Captured stdout call -----------------------------
+hitl_poller 启动：1 个 session，间隔 0.01s，bus=memory
+  📨 exec-a → replied
+__________________ test_reply_event_reaches_real_event_filter __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x112492d70>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4037/test_reply_event_reaches_real_0')
+
+    def test_reply_event_reaches_real_event_filter(monkeypatch, tmp_path):
+        """按发布参数装配的事件必须通过真实 EventFilter 并命中挂起订阅。"""
+        execution_id = "exec-a"
+        sessions_path = tmp_path / "sessions.json"
+        sessions_path.write_text(json.dumps({
+            execution_id: {"session_id": "sess-a"},
+        }), encoding="utf-8")
+    
+        bus = _RecordingBus()
+        _run_one_round(monkeypatch, sessions_path, bus)
+        event_type, kwargs = bus.publishes[0]
+    
+        # 与 RedisEventBus.publish(str, **kwargs) 的装配语义一致：
+        # correlation_id 走关键字参数，其余 kwargs 进 data。
+        event = Event(
+            event_type=event_type,
+            data={k: v for k, v in kwargs.items() if k != "correlation_id"},
+            correlation_id=kwargs.get("correlation_id"),
+        )
+    
+        subscription = EventSubscription(
+            event_type=EVENT_TYPE,
+            correlation_id=execution_id,
+            flow_id="flow-1",
+            node_id="confirm",
+        )
+        # 第二重不命中（订阅侧按 execution_id 匹配）的直接证据。
+        assert subscription.matches_event(event, {}) is (
+            event.correlation_id == execution_id
+        )
+    
+        async def _drive():
+            subscriptions = InMemoryEventSubscriptionStorage()
+            await subscriptions.store_subscription(subscription)
+            execution_storage = _ProbeExecutionStorage(execution_id)
+            redis_client = _FakeRedis()
+            event_filter = EventFilter(
+                execution_storage=execution_storage,
+                subscription_storage=subscriptions,
+                redis_client=redis_client,
+                event_bus=bus,
+                enable_subscription_timeout_checker=False,
+            )
+            await event_filter.handle_event(event)
+            return execution_storage, redis_client
+    
+        execution_storage, redis_client = asyncio.run(_drive())
+    
+        # 入口门禁放行：按 correlation_id 取到了执行状态。
+>       assert execution_storage.loaded == [execution_id]
+E       AssertionError: assert [] == ['exec-a']
+E         
+E         Right contains one more item: 'exec-a'
+E         Use -v to get more diff
+
+tests/test_issue10_hitl_reply_correlation.py:169: AssertionError
+----------------------------- Captured stdout call -----------------------------
+hitl_poller 启动：1 个 session，间隔 0.01s，bus=memory
+  📨 exec-a → replied
+=========================== short test summary info ============================
+FAILED tests/test_issue10_hitl_reply_correlation.py::test_publish_carries_correlation_id
+FAILED tests/test_issue10_hitl_reply_correlation.py::test_reply_event_reaches_real_event_filter
+2 failed in 0.62s
