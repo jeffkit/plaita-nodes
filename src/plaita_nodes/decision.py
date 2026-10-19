@@ -91,6 +91,39 @@ def _render_payload(payload: Any) -> str:
         return str(payload)
 
 
+def _indexed_batch(entries: Any, count: int) -> list[tuple[int, dict]]:
+    """把批量结果按模型返回的 ``index`` 对齐到输入条目（#8）。
+
+    provider 可能乱序返回，不能按数组位置贴标签——否则 choice/置信度会
+    静默张冠李戴。这里统一校验：条数、对象、index 为整数、落在
+    ``0..count-1``、不重复、不缺失；返回按 index 升序的 ``(index, entry)``。
+    """
+    if not isinstance(entries, list) or len(entries) != count:
+        raise DecisionError(
+            f"批量结果数不符：期望 {count} 条，实际 {str(entries)[:120]}")
+    by_index: dict[int, tuple[int, dict]] = {}
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise DecisionError(f"批量结果第 {position} 条不是对象: {str(entry)[:80]}")
+        if "index" not in entry:
+            raise DecisionError(f"批量结果第 {position} 条缺少 index: {str(entry)[:80]}")
+        index = entry["index"]
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise DecisionError(
+                f"批量结果第 {position} 条的 index 非整数: {index!r}")
+        if not 0 <= index < count:
+            raise DecisionError(
+                f"批量结果第 {position} 条的 index 越界: {index}（期望 0..{count - 1}）")
+        if index in by_index:
+            raise DecisionError(
+                f"批量结果 index 重复: {index}（第 {by_index[index][0]} 与第 {position} 条）")
+        by_index[index] = (position, entry)
+    missing = [i for i in range(count) if i not in by_index]
+    if missing:
+        raise DecisionError(f"批量结果缺少 index: {missing}")
+    return [(i, by_index[i][1]) for i in range(count)]
+
+
 def _extract_json(text: str) -> dict:
     text = (text or "").strip()
     try:
@@ -178,16 +211,10 @@ def _provider_llm(*, question: Any, choices: list[dict], input: Any, items: Opti
             raise DecisionError(f"confidence 非数值: {entry.get('confidence')!r}") from exc
 
     if items is not None:
-        entries = data.get("results")
-        if not isinstance(entries, list) or len(entries) != len(items):
-            raise DecisionError(
-                f"LLM 批量结果数不符：期望 {len(items)} 条，实际 {str(entries)[:120]}")
         results = []
-        for i, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                raise DecisionError(f"批量结果第 {i} 条不是对象: {str(entry)[:80]}")
+        for index, entry in _indexed_batch(data.get("results"), len(items)):
             choice, confidence = _one(entry)
-            results.append({"index": i, "choice": choice, "confidence": confidence})
+            results.append({"index": index, "choice": choice, "confidence": confidence})
         return {"results": results, "model": resolved_model, "raw": text[:2000]}
 
     choice, confidence = _one(data)
@@ -472,26 +499,21 @@ class DecisionNode(Node):
         if provider_name == "llm" and self.extra_body is not None:
             kwargs["extra_body"] = ev(self.extra_body)
         out = fn(**kwargs)
-        entries = out.get("results")
-        if not isinstance(entries, list) or len(entries) != len(items):
-            raise DecisionError(
-                f"provider 批量结果数不符：期望 {len(items)} 条，实际 {str(entries)[:120]}")
-
         results = []
         any_low = False
-        for i, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                raise DecisionError(f"批量结果第 {i} 条不是对象: {str(entry)[:80]}")
-            choice, confidence = self._checked(entry, choices, index=i)
+        # 以模型返回的 index 为准（#8）：乱序结果按 index 归位，重复/越界/缺失
+        # 具名失败，不按数组位置贴标签。
+        for index, entry in _indexed_batch(out.get("results"), len(items)):
+            choice, confidence = self._checked(entry, choices, index=index)
             low = self.min_confidence is not None and confidence < float(self.min_confidence)
             if low and self.on_low_confidence == "error":
                 raise DecisionError(
-                    f"第 {i} 项置信度 {confidence:.2f} 低于阈值 {self.min_confidence}"
+                    f"第 {index} 项置信度 {confidence:.2f} 低于阈值 {self.min_confidence}"
                     f"（choice={choice!r}）")
             if low and self.on_low_confidence == "default":
                 choice = self._default(execution)
             any_low = any_low or low
-            results.append({"index": i, "choice": choice,
+            results.append({"index": index, "choice": choice,
                             "confidence": confidence, "low_confidence": low})
         return {"results": results, "provider": provider_name,
                 "model": str(out.get("model") or ""),

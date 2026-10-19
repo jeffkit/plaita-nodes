@@ -307,6 +307,79 @@ def test_llm_provider_batch_count_mismatch(openai_stub):
         node.execute(FakeExecution())
 
 
+def test_llm_provider_batch_uses_model_index_not_array_position(openai_stub):
+    """#8：模型乱序返回时按 index 贴标签，不能按数组位置张冠李戴。"""
+    openai_stub.content = json.dumps({"results": [
+        {"index": 2, "choice": "ham", "confidence": 0.90},
+        {"index": 0, "choice": "spam", "confidence": 0.97},
+        {"index": 1, "choice": "ham", "confidence": 0.30},
+    ]})
+    node = DecisionNode(id="t", choices=["spam", "ham"],
+                        items=["a", "b", "c"], min_confidence=0.8,
+                        api_base=openai_stub.base, api_key="k", model="m")
+    out = node.execute(FakeExecution())
+    assert [(r["index"], r["choice"], r["confidence"]) for r in out["results"]] == [
+        (0, "spam", 0.97),
+        (1, "ham", 0.30),
+        (2, "ham", 0.90),
+    ]
+    assert [r["low_confidence"] for r in out["results"]] == [False, True, False]
+
+
+@pytest.mark.parametrize(
+    "index, match",
+    [
+        (0, "index 重复"),          # 两条 index=0，len 相同但 1 缺失
+        (7, "index 越界"),
+        ("1", "index 非整数"),
+        (True, "index 非整数"),
+        (None, "缺少 index"),
+    ],
+)
+def test_llm_provider_batch_rejects_bad_index(openai_stub, index, match):
+    second = {"choice": "ham", "confidence": 0.5}
+    if index is not None:
+        second["index"] = index
+    openai_stub.content = json.dumps({"results": [
+        {"index": 0, "choice": "spam", "confidence": 0.9},
+        second,
+    ]})
+    node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                        api_base=openai_stub.base, api_key="k", model="m")
+    with pytest.raises(DecisionError, match=match):
+        node.execute(FakeExecution())
+
+
+def test_custom_provider_batch_index_mapping_and_bounds():
+    """自定义 provider 的乱序结果同样按 index 归位；越界也具名拒绝。"""
+    def provider(**request):
+        return {"results": [
+            {"index": 1, "choice": "ham", "confidence": 0.9},
+            {"index": 0, "choice": "spam", "confidence": 0.8},
+        ], "model": "custom", "raw": "{}"}
+
+    register_decision_provider("test-shuffle", provider)
+    try:
+        node = DecisionNode(id="t", provider="test-shuffle",
+                            choices=["spam", "ham"], items=["a", "b"])
+        out = node.execute(FakeExecution())
+        assert [(r["index"], r["choice"]) for r in out["results"]] == [
+            (0, "spam"), (1, "ham")]
+
+        def missing(**request):
+            return {"results": [{"index": 2, "choice": "spam", "confidence": 0.9},
+                                {"index": 0, "choice": "ham", "confidence": 0.9}]}
+
+        register_decision_provider("test-missing", missing)
+        node2 = DecisionNode(id="t", provider="test-missing",
+                             choices=["spam", "ham"], items=["a", "b"])
+        with pytest.raises(DecisionError, match="index 越界"):
+            node2.execute(FakeExecution())
+    finally:
+        DECISION_PROVIDERS.pop("test-shuffle", None)
+        DECISION_PROVIDERS.pop("test-missing", None)
+
+
 def test_jev_provider_batch(jev_stub):
     jev_stub.choice, jev_stub.confidence = "keep", 0.9
     node = DecisionNode(id="t", question="是否可交互", provider="jev",
