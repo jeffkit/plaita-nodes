@@ -1,0 +1,39 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_git_publish_global_dry_run_zero_git_calls ________________
+
+git_repo = (PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4050/test_git_publish_globa...ar/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4050/test_git_publish_global_dry_ru0/origin.git'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10881e520>
+
+    def test_git_publish_global_dry_run_zero_git_calls(git_repo, monkeypatch):
+        wt, origin = git_repo
+        (wt / "b.txt").write_text("uncommitted change")
+        head_before = _git("rev-parse", "HEAD", cwd=wt)
+    
+        calls = []
+        real_run = subprocess.run
+    
+        def spy(argv, *args, **kwargs):
+            calls.append(list(argv) if isinstance(argv, (list, tuple)) else argv)
+            return real_run(argv, *args, **kwargs)
+    
+        # 同时覆盖 git_publish 自身与 _git_env 的 filter 枚举（同一 subprocess 模块）。
+        monkeypatch.setattr("plaita_nodes.git_publish.subprocess.run", spy)
+    
+        out = GitPublishNode(
+            id="g", worktree_dir=str(wt), branch_name="p/issue-1",
+            issue_number=1, dry_run=False,
+        ).execute(FakeExecution({"dry_run": True}))
+    
+>       assert calls == [], f"dry-run 期间发生 git 子进程调用: {calls}"
+E       AssertionError: dry-run 期间发生 git 子进程调用: [['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', 'config', '--get-regexp', '--null', '--name-only', '^filter\\..*\\.(clean|smudge|process)$'], ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', 'status', '--porcelain'], ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', 'add', '-A'], ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', 'commit', '-m', 'fix: issue #1'], ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', 'ls-remote', '--heads', 'origin', 'p/issue-1'], ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', 'rev-parse', 'HEAD'], ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', 'push', '-u', 'origin', 'p/issue-1']]
+E       assert [['git', '-c'...c', ...], ...] == []
+E         
+E         Left contains 7 more items, first extra item: ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', ...]
+E         Use -v to get more diff
+
+tests/test_issue16_global_dry_run.py:64: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_issue16_global_dry_run.py::test_git_publish_global_dry_run_zero_git_calls
+1 failed in 0.73s
+exit=1

@@ -1,0 +1,49 @@
+.FF                                                                      [100%]
+=================================== FAILURES ===================================
+________________ test_notify_global_dry_run_zero_backend_calls _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10681e3f0>
+
+    def test_notify_global_dry_run_zero_backend_calls(monkeypatch):
+        calls = []
+    
+        def _fake(execution, node, text):
+            calls.append(text)
+            return {"ok": True, "channel": node.channel}
+    
+        register_notify_backend("dry_probe", _fake)
+        try:
+            ex = _CountingExecution({"dry_run": True})
+            out = NotifyNode(id="n", message="SHOULD_NOT_SEND", channel="dry_probe",
+                             dry_run=False).execute(ex)
+        finally:
+            NOTIFY_BACKENDS.pop("dry_probe", None)
+    
+>       assert calls == [], f"dry-run 期间通知 backend 被调用: {calls}"
+E       AssertionError: dry-run 期间通知 backend 被调用: ['SHOULD_NOT_SEND']
+E       assert ['SHOULD_NOT_SEND'] == []
+E         
+E         Left contains one more item: 'SHOULD_NOT_SEND'
+E         Use -v to get more diff
+
+tests/test_issue16_global_dry_run.py:97: AssertionError
+________________ test_notify_terminal_global_dry_run_is_silent _________________
+
+capsys = <_pytest.capture.CaptureFixture object at 0x1068ccec0>
+
+    def test_notify_terminal_global_dry_run_is_silent(capsys):
+        out = NotifyNode(id="n", message="SHOULD_NOT_PRINT", dry_run=False).execute(
+            FakeExecution({"dry_run": True}))
+        printed = capsys.readouterr().out
+>       assert printed == "", f"dry-run 期间终端收到通知: {printed!r}"
+E       AssertionError: dry-run 期间终端收到通知: '[notify] SHOULD_NOT_PRINT\n'
+E       assert '[notify] SHOULD_NOT_PRINT\n' == ''
+E         
+E         + [notify] SHOULD_NOT_PRINT
+
+tests/test_issue16_global_dry_run.py:106: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_issue16_global_dry_run.py::test_notify_global_dry_run_zero_backend_calls
+FAILED tests/test_issue16_global_dry_run.py::test_notify_terminal_global_dry_run_is_silent
+2 failed, 1 passed in 0.55s
+exit=1
