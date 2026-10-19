@@ -32,6 +32,36 @@ NotifyBackend = Callable[[Any, Any, str], dict]
 NOTIFY_BACKENDS: Dict[str, NotifyBackend] = {}
 
 
+class WebhookBusinessError(DeterministicRuntimeError):
+    """HTTP 200 但响应体业务码表示失败（A2R7-06）。
+
+    凭据错误 / 签名错误 / 参数错误等：同一请求重跑必然以同样方式失败，
+    不随 ``retryTimes`` 重放（避免重复群消息）。
+    """
+
+
+class WebhookTransientBusinessError(RuntimeError):
+    """HTTP 200 + 限流类业务码：瞬态失败，保留 ``retryTimes`` 退避重试。"""
+
+
+#: 各 IM 通道的「业务成功码」字段。字段缺省视为兼容（测试桩/网关只回
+#: ``{"ok": true}``）；字段存在且非 0 即业务失败。
+_BUSINESS_CODE_FIELDS = {
+    "feishu_webhook": "code",
+    "wecom_webhook": "errcode",
+    "dingtalk_webhook": "errcode",
+}
+
+#: 限流类业务码（瞬态）：其余非 0 业务码一律确定性失败。
+#: Feishu 9499 / 11232、WeCom 45009 / 45033、DingTalk 130101 均为官方
+#: 「频率超限」族；Slack 的 ``rate_limited`` 在 body 的 error 字段。
+_RETRYABLE_BUSINESS_CODES = {
+    "feishu_webhook": frozenset({9499, 11232}),
+    "wecom_webhook": frozenset({45009, 45033}),
+    "dingtalk_webhook": frozenset({130101}),
+}
+
+
 def register_notify_backend(name: str, backend: NotifyBackend) -> None:
     """注册通知 backend（覆盖同名内置项；先例 register_decision_provider）。"""
     NOTIFY_BACKENDS[name] = backend
@@ -64,7 +94,48 @@ def _credential_url(node: Any) -> str:
     return url
 
 
-def _post_json(url: str, payload: Dict[str, Any]) -> dict:
+def _business_error(channel: str, code: Any, message: Any, *, retryable: bool) -> None:
+    """把 200 + 业务错误码转成具名失败（A2R7-06）。
+
+    Feishu ``code=19003`` / WeCom ``errcode=93000`` / DingTalk
+    ``errcode=310000`` / Slack ``ok=false`` 都是 HTTP 200——只判状态码会让
+    通知被静默丢弃。限流码保持可重试，其余为确定性失败（不重放群消息）。
+    响应体可能回显 URL/凭据，异常文案同样过 ``_scrub_url_text``。
+    """
+    detail = _scrub_url_text(
+        f"{channel} webhook 业务错误 code={code}: {str(message)[:200]}")
+    if retryable:
+        raise WebhookTransientBusinessError(detail)
+    raise WebhookBusinessError(detail)
+
+
+def _check_business_code(channel: str, body: Any) -> None:
+    """按通道解析 200 响应体的业务码；缺字段视为兼容（视为成功）。"""
+    if not isinstance(body, dict):
+        return
+    if channel == "slack_webhook":
+        if body.get("ok") is False:
+            error = str(body.get("error") or "ok=false")
+            _business_error(channel, error,
+                            body.get("error") or body,
+                            retryable=error in ("rate_limited", "ratelimited"))
+        return
+    field = _BUSINESS_CODE_FIELDS.get(channel)
+    if field is None or field not in body:
+        return
+    raw = body[field]
+    try:
+        code = int(raw)
+    except (TypeError, ValueError):
+        code = raw
+    if code == 0:
+        return
+    _business_error(
+        channel, raw, body.get("msg") or body.get("errmsg") or body,
+        retryable=code in _RETRYABLE_BUSINESS_CODES.get(channel, ()))
+
+
+def _post_json(url: str, payload: Dict[str, Any], *, channel: str) -> dict:
     try:
         resp = requests.post(url, json=payload, timeout=15)
     except requests.RequestException as exc:
@@ -86,6 +157,7 @@ def _post_json(url: str, payload: Dict[str, Any]) -> dict:
         if is_retryable_http_status(resp.status_code):
             raise RuntimeError(detail)
         raise DeterministicRuntimeError(detail)
+    _check_business_code(channel, body)
     return {"status": resp.status_code, "response": body}
 
 
@@ -97,15 +169,17 @@ def _backend_terminal(execution: Any, node: Any, text: str) -> dict:
 
 
 def _backend_feishu_webhook(execution: Any, node: Any, text: str) -> dict:
-    return _post_json(_credential_url(node), {"msg_type": "text", "content": {"text": text}})
+    return _post_json(_credential_url(node), {"msg_type": "text", "content": {"text": text}},
+                      channel="feishu_webhook")
 
 
 def _backend_wecom_webhook(execution: Any, node: Any, text: str) -> dict:
-    return _post_json(_credential_url(node), {"msgtype": "text", "text": {"content": text}})
+    return _post_json(_credential_url(node), {"msgtype": "text", "text": {"content": text}},
+                      channel="wecom_webhook")
 
 
 def _backend_slack_webhook(execution: Any, node: Any, text: str) -> dict:
-    return _post_json(_credential_url(node), {"text": text})
+    return _post_json(_credential_url(node), {"text": text}, channel="slack_webhook")
 
 
 def _backend_dingtalk_webhook(execution: Any, node: Any, text: str) -> dict:
@@ -128,7 +202,8 @@ def _backend_dingtalk_webhook(execution: Any, node: Any, text: str) -> dict:
         sign = urllib.parse.quote_plus(base64.b64encode(digest))
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}timestamp={ts}&sign={sign}"
-    return _post_json(url, {"msgtype": "text", "text": {"content": text}})
+    return _post_json(url, {"msgtype": "text", "text": {"content": text}},
+                      channel="dingtalk_webhook")
 
 
 def _backend_email_send(execution: Any, node: Any, text: str) -> dict:

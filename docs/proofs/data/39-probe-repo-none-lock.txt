@@ -1,0 +1,1 @@
+[repo-none] preflight_calls= 1 run_lock_key= /Users/kong/projects/infra4agent/plaita-nodes cwd= /Users/kong/projects/infra4agent/plaita-nodes out= OK

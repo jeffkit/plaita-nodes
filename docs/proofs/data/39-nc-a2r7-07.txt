@@ -1,0 +1,103 @@
+FFF.                                                                     [100%]
+=================================== FAILURES ===================================
+__________ test_flow_timeout_interrupts_query_and_releases_connection __________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3973/test_flow_timeout_interrupts_q0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106b0eb10>
+
+    def test_flow_timeout_interrupts_query_and_releases_connection(tmp_path, monkeypatch):
+        url = _url(tmp_path)
+        monkeypatch.setattr(database, "get_credential", lambda name: {"url": url})
+        try:
+            engine = database._get_engine(url)
+            assert engine.pool.checkedout() == 0
+    
+            flow = Flow.model_validate({
+                "nodes": [
+                    {"type": "start", "id": "start", "next": "q"},
+                    {"type": "sql_query", "id": "q", "credential": "c", "query": SLOW_SQL,
+                     "next": "end", "timeout": "PT0.3S"},
+                    {"type": "end", "id": "end", "resultType": "success",
+                     "output": "$NODE.q"},
+                ]
+            })
+            started = time.monotonic()
+            with pytest.raises(Exception):  # NodeTimeoutError
+                FlowExecution().run_compatible(flow, False)
+            assert time.monotonic() - started < 3.0
+    
+            # 修复前：查询继续跑满 ~6.6s，连接始终 checked out。
+            # 修复后：看门狗中断语句，连接在 2s 内归还池（对齐 r8 C1 正控）。
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and engine.pool.checkedout():
+                time.sleep(0.02)
+>           assert engine.pool.checkedout() == 0, (
+                "flow 超时后连接仍被占用：查询未被中断（A2R7-07）")
+E               AssertionError: flow 超时后连接仍被占用：查询未被中断（A2R7-07）
+E               assert 1 == 0
+E                +  where 1 = checkedout()
+E                +    where checkedout = <sqlalchemy.pool.impl.QueuePool object at 0x107281a90>.checkedout
+E                +      where <sqlalchemy.pool.impl.QueuePool object at 0x107281a90> = Engine(sqlite:////private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3973/test_flow_timeout_interrupts_q0/slow.db).pool
+
+tests/test_a2r7_07_sql_cancel.py:99: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.runner:runner.py:682 Sync node q timed out after 300ms (cancel_event set)
+___________ test_cancel_requested_before_execution_skips_connection ____________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3973/test_cancel_requested_before_e0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106b0e8b0>
+
+    def test_cancel_requested_before_execution_skips_connection(tmp_path, monkeypatch):
+        url = _url(tmp_path)
+        monkeypatch.setattr(database, "get_credential", lambda name: {"url": url})
+        try:
+            event = threading.Event()
+            event.set()
+            node = SqlQueryNode(id="q", credential="c", query="SELECT 1")
+>           with pytest.raises(NodeCancelledError):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes._cancel.NodeCancelledError'>
+
+tests/test_a2r7_07_sql_cancel.py:112: Failed
+______________ test_cancel_event_during_query_returns_connection _______________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3973/test_cancel_event_during_query0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1072f9130>
+
+    def test_cancel_event_during_query_returns_connection(tmp_path, monkeypatch):
+        """直接调用（非引擎路径）：cancel_event 置位后查询被中断、连接归还。"""
+        url = _url(tmp_path)
+        monkeypatch.setattr(database, "get_credential", lambda name: {"url": url})
+        try:
+            engine = database._get_engine(url)
+            event = threading.Event()
+            node = SqlQueryNode(id="q", credential="c", query=SLOW_SQL)
+            result = {}
+    
+            def _run():
+                try:
+                    result["out"] = node.execute(_Exec(cancel_event=event))
+                except BaseException as exc:  # noqa: BLE001 — 断言中断已发生
+                    result["exc"] = exc
+    
+            thread = threading.Thread(target=_run)
+            thread.start()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and engine.pool.checkedout() == 0:
+                time.sleep(0.02)
+            assert engine.pool.checkedout() == 1, "慢查询未进入执行（探针前置失败）"
+    
+            event.set()
+            thread.join(2.0)
+>           assert not thread.is_alive(), "cancel_event 置位后查询未在 2s 内退出"
+E           AssertionError: cancel_event 置位后查询未在 2s 内退出
+E           assert not True
+E            +  where True = is_alive()
+E            +    where is_alive = <Thread(Thread-1 (_run), started 6219231232)>.is_alive
+
+tests/test_a2r7_07_sql_cancel.py:145: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_a2r7_07_sql_cancel.py::test_flow_timeout_interrupts_query_and_releases_connection
+FAILED tests/test_a2r7_07_sql_cancel.py::test_cancel_requested_before_execution_skips_connection
+FAILED tests/test_a2r7_07_sql_cancel.py::test_cancel_event_during_query_returns_connection
+3 failed, 1 passed in 4.85s

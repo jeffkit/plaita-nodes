@@ -12,6 +12,11 @@ SELECT 返回 {"rows": [...], "rowcount": n}；写操作返回 {"rowcount": n}�
 （fail-closed，不返回部分结果——静默截断会让下游算错）。两个上限必须为
 正整数，显式 0/负值抛 ``ValueError``（不静默夹成 1）。
 dry-run（节点字段或 globalContext.dry_run）直接返回 {"rows": [], "rowcount": 0, "dry_run": True}，不解析凭据不连库。
+
+取消（A2R7-07）：引擎在节点预算超时时置位 ``execution.cancel_event`` 并遗弃
+节点线程；本节点有看门狗消费该标志，调用驱动的原生取消（psycopg ``cancel()`` /
+sqlite3 ``interrupt()``，无原生取消则 ``invalidate()``）打断正在执行的语句，
+让 ``engine.begin()`` 尽快回滚并把连接归还池——不会让查询继续占用连接到自然结束。
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ from typing import Any, ClassVar, Dict, Optional
 from plaita.credentials import get_credential
 from plaita.node.basic import Node
 
+from ._cancel import CANCEL_POLL_SECONDS, NodeCancelledError, cancellation_requested
 from ._retry import DeterministicError
 
 _engine_cache: Dict[str, Any] = {}
@@ -119,6 +125,50 @@ def _positive_limit(name: str, value: Any) -> int:
     return limit
 
 
+def _interrupt_db_connection(conn: Any) -> bool:
+    """尽力中断 ``conn`` 上正在执行的语句（A2R7-07）。
+
+    优先用驱动的原生取消：psycopg/psycopg2 的 ``cancel()`` 发送 cancel
+    request，sqlite3 的 ``interrupt()`` 打断 VM。没有原生取消的驱动退化为
+    ``Connection.invalidate()``——关闭 DBAPI 连接，阻塞中的调用随即报错，
+    连接不会留在池里。返回是否至少发出一次中断信号。
+    """
+    driver = None
+    try:
+        fairy = conn.connection
+        driver = getattr(fairy, "driver_connection", None)
+        if driver is None:  # SQLAlchemy 1.4 旧属性
+            driver = getattr(fairy, "connection", None)
+    except Exception:  # noqa: BLE001 — 已关闭的连接/桩连接
+        driver = None
+    if driver is not None:
+        for name in ("cancel", "interrupt"):
+            action = getattr(driver, name, None)
+            if callable(action):
+                try:
+                    action()
+                    return True
+                except Exception:  # noqa: BLE001 — 尽力而为，退到下一种方式
+                    continue
+    try:
+        conn.invalidate()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _watch_cancel(execution: Any, conn: Any, finished: threading.Event) -> None:
+    """看门狗：节点预算超时（cancel_event 置位）时中断仍在跑的语句。
+
+    引擎在节点超时时只遗弃线程（``plaita/core/runner.py::_run_sync_node``）；
+    没有这一步，阻塞的 ``conn.execute`` 会继续持有连接直到查询自然结束。
+    """
+    while not finished.wait(CANCEL_POLL_SECONDS):
+        if cancellation_requested(execution):
+            _interrupt_db_connection(conn)
+            return
+
+
 class SqlQueryNode(Node):
     """SQL 查询：对凭据指向的数据库执行 SQL。
 
@@ -158,33 +208,59 @@ class SqlQueryNode(Node):
         # params 逐值解析：整 dict 走 evaluate 在字面量场景会得到 None
         bind = {k: _resolve(execution, v) for k, v in (self.params or {}).items()}
 
+        # 执行级取消（cancel_requested 粘滞）在解密凭据/取连接前就拒绝；
+        # 节点级 cancel_event 在节点入口已被引擎复位，这里只会看到本次取消。
+        if cancellation_requested(execution):
+            raise NodeCancelledError("sql_query cancelled before execution")
+
         engine = _get_engine(url)
+        finished = threading.Event()
+        watcher: Optional[threading.Thread] = None
         with engine.begin() as conn:
-            result = conn.execute(
-                text(sql).execution_options(stream_results=True), bind or {}
-            )
-            if result.returns_rows:
-                # plaita#205：分批读取并**先判上限再入列**——不先物化整表再
-                # 检查；超限 fail-closed 抛具名异常，绝不返回部分结果。
-                rows: list[Dict[str, Any]] = []
-                used_bytes = 0
-                batch_size = 256
-                while True:
-                    batch = result.fetchmany(batch_size)
-                    if not batch:
-                        break
-                    for row in batch:
-                        item = dict(row._mapping)
-                        encoded = json.dumps(item, ensure_ascii=False, default=str)
-                        size = len(encoded.encode("utf-8"))
-                        if len(rows) + 1 > row_limit or used_bytes + size > byte_limit:
-                            raise SqlResultLimitError(
-                                max_rows=row_limit,
-                                max_bytes=byte_limit,
-                                observed_rows=len(rows) + 1,
-                                observed_bytes=used_bytes + size,
-                            )
-                        rows.append(item)
-                        used_bytes += size
-                return {"rows": rows, "rowcount": len(rows)}
-            return {"rowcount": result.rowcount}
+            # 引擎节点超时 → cancel_event 置位并遗弃本线程；看门狗负责中断
+            # 仍在执行的语句，让 engine.begin() 尽快回滚/归还连接（A2R7-07）。
+            # 旧执行桩没有取消事件 → 不起线程，行为不变。
+            if (getattr(execution, "cancel_event", None) is not None
+                    or getattr(execution, "cancel_requested", None) is not None):
+                watcher = threading.Thread(
+                    target=_watch_cancel, args=(execution, conn, finished),
+                    daemon=True, name="plaita-sql-cancel")
+                watcher.start()
+            try:
+                if cancellation_requested(execution):
+                    raise NodeCancelledError("sql_query cancelled before statement")
+                result = conn.execute(
+                    text(sql).execution_options(stream_results=True), bind or {}
+                )
+                if result.returns_rows:
+                    # plaita#205：分批读取并**先判上限再入列**——不先物化整表再
+                    # 检查；超限 fail-closed 抛具名异常，绝不返回部分结果。
+                    rows: list[Dict[str, Any]] = []
+                    used_bytes = 0
+                    batch_size = 256
+                    while True:
+                        if cancellation_requested(execution):
+                            raise NodeCancelledError(
+                                "sql_query cancelled; statement interrupted")
+                        batch = result.fetchmany(batch_size)
+                        if not batch:
+                            break
+                        for row in batch:
+                            item = dict(row._mapping)
+                            encoded = json.dumps(item, ensure_ascii=False, default=str)
+                            size = len(encoded.encode("utf-8"))
+                            if len(rows) + 1 > row_limit or used_bytes + size > byte_limit:
+                                raise SqlResultLimitError(
+                                    max_rows=row_limit,
+                                    max_bytes=byte_limit,
+                                    observed_rows=len(rows) + 1,
+                                    observed_bytes=used_bytes + size,
+                                )
+                            rows.append(item)
+                            used_bytes += size
+                    return {"rows": rows, "rowcount": len(rows)}
+                return {"rowcount": result.rowcount}
+            finally:
+                finished.set()
+                if watcher is not None:
+                    watcher.join(1.0)

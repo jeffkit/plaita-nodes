@@ -1,0 +1,5 @@
+[feishu_webhook] raised WebhookBusinessError: feishu_webhook webhook 业务错误 code=19003: invalid webhook token
+[wecom_webhook] raised WebhookBusinessError: wecom_webhook webhook 业务错误 code=93000: invalid webhook url
+[slack_webhook] raised WebhookBusinessError: slack_webhook webhook 业务错误 code=invalid_token: invalid_token
+[dingtalk_webhook] raised WebhookBusinessError: dingtalk_webhook webhook 业务错误 code=310000: sign not match
+[http-400] raised DeterministicRuntimeError: webhook 调用失败 HTTP 400: {'msg': 'bad'}

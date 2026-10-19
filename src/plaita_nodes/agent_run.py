@@ -423,16 +423,18 @@ class AgentRunNode(Node):
         profile = resolve_agent(agent_name, repo=repo)
         executor = profile["executor"]
 
-        # kill-before-start（G3）：直跑路径的 repo 即 agent 的工作 worktree，
+        # kill-before-start（G3）：直跑路径的 workspace 即 agent 的工作目录，
         # 开工前清掉同 workspace 的孤儿；本次 spawn 也落遗言锁供下轮清理。
+        # ``repo`` 缺省时工作区就是进程 cwd（节点文档的默认语义）——同构守卫
+        # 不能只在 ``if repo:`` 里：默认 cwd 的孤儿 agent 同样会并发写，且没有
+        # 遗言锁让下一次 run 看见（A2R7-08）。
         # 沙箱路径不走此门：VM 边界 + WorkspaceLease 已各管一摊。
-        run_lock_key: Optional[str] = None
-        if repo:
-            # run 作用域取 execution_id（每 dispatch 唯一）⇒ 原子锁文件按 run 分开；
-            # 无 execution_id 的执行桩回退裸 workspace 键（今日行为）。同 _execute_sandboxed。
-            run_scope = str(getattr(execution, "execution_id", "") or "")
-            run_lock_key = _run_lock_key(str(repo), run_scope or None)
-            preflight_workspace(str(repo), run_key=run_scope or None)
+        workspace = str(repo) if repo else os.getcwd()
+        # run 作用域取 execution_id（每 dispatch 唯一）⇒ 原子锁文件按 run 分开；
+        # 无 execution_id 的执行桩回退裸 workspace 键（今日行为）。同 _execute_sandboxed。
+        run_scope = str(getattr(execution, "execution_id", "") or "")
+        run_lock_key = _run_lock_key(workspace, run_scope or None)
+        preflight_workspace(workspace, run_key=run_scope or None)
 
         # agentproc 延迟到执行时才 import（可选依赖，见 register_recursive_direct）
         register_recursive_direct()
@@ -489,7 +491,9 @@ class AgentRunNode(Node):
                        # ⇒ 这才是正确形态；agentproc 路径遗漏了。
                        # 影响面：全部 14 个 agentproc executor（cursor/claude-code/
                        # codex/deepseek/…），非仅 cursor。
-                       cwd=str(repo) if repo else None,
+                       # repo 缺省时显式传 cwd：与 preflight/遗言锁用的是同一个
+                       # workspace（进程 cwd），锁键与实际工作目录不会漂移。
+                       cwd=workspace,
                        run_lock_key=run_lock_key,
                        timeout_secs=int(execution.evaluate(self.timeout_secs) or 1800),
                        # 协作式取消（2026-10 波次③步内中断）：worker 取消监听命中

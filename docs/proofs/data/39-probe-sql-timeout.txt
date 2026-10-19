@@ -1,0 +1,5 @@
+[sql-timeout] flow raised NodeTimeoutError after 0.30s
+[sql-timeout] +0.05s pool_checkedout=1
+[sql-timeout] +0.20s pool_checkedout=0
+[sql-timeout] +0.50s pool_checkedout=0
+[sql-timeout] +1.00s pool_checkedout=0

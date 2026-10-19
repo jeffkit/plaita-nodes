@@ -1,0 +1,150 @@
+FFFF......FFFF                                                           [100%]
+=================================== FAILURES ===================================
+_ test_business_error_body_raises_named_deterministic_error[FeishuWebhookNode-body0-19003] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107844640>
+node_cls = <class 'plaita_nodes.webhooks.FeishuWebhookNode'>
+body = {'code': 19003, 'msg': 'invalid webhook token'}, needle = '19003'
+
+    @pytest.mark.parametrize("node_cls,body,needle", [
+        (FeishuWebhookNode, {"code": 19003, "msg": "invalid webhook token"}, "19003"),
+        (WecomWebhookNode, {"errcode": 93000, "errmsg": "invalid webhook url"}, "93000"),
+        (SlackWebhookNode, {"ok": False, "error": "invalid_token"}, "invalid_token"),
+        (DingtalkWebhookNode, {"errcode": 310000, "errmsg": "sign not match"}, "310000"),
+    ])
+    def test_business_error_body_raises_named_deterministic_error(monkeypatch, node_cls, body, needle):
+        _patch_post(monkeypatch, body)
+>       with pytest.raises(WebhookBusinessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.notify_backends.WebhookBusinessError'>
+
+tests/test_a2r7_06_webhook_business_codes.py:79: Failed
+_ test_business_error_body_raises_named_deterministic_error[WecomWebhookNode-body1-93000] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107844510>
+node_cls = <class 'plaita_nodes.webhooks.WecomWebhookNode'>
+body = {'errcode': 93000, 'errmsg': 'invalid webhook url'}, needle = '93000'
+
+    @pytest.mark.parametrize("node_cls,body,needle", [
+        (FeishuWebhookNode, {"code": 19003, "msg": "invalid webhook token"}, "19003"),
+        (WecomWebhookNode, {"errcode": 93000, "errmsg": "invalid webhook url"}, "93000"),
+        (SlackWebhookNode, {"ok": False, "error": "invalid_token"}, "invalid_token"),
+        (DingtalkWebhookNode, {"errcode": 310000, "errmsg": "sign not match"}, "310000"),
+    ])
+    def test_business_error_body_raises_named_deterministic_error(monkeypatch, node_cls, body, needle):
+        _patch_post(monkeypatch, body)
+>       with pytest.raises(WebhookBusinessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.notify_backends.WebhookBusinessError'>
+
+tests/test_a2r7_06_webhook_business_codes.py:79: Failed
+_ test_business_error_body_raises_named_deterministic_error[SlackWebhookNode-body2-invalid_token] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107712690>
+node_cls = <class 'plaita_nodes.webhooks.SlackWebhookNode'>
+body = {'error': 'invalid_token', 'ok': False}, needle = 'invalid_token'
+
+    @pytest.mark.parametrize("node_cls,body,needle", [
+        (FeishuWebhookNode, {"code": 19003, "msg": "invalid webhook token"}, "19003"),
+        (WecomWebhookNode, {"errcode": 93000, "errmsg": "invalid webhook url"}, "93000"),
+        (SlackWebhookNode, {"ok": False, "error": "invalid_token"}, "invalid_token"),
+        (DingtalkWebhookNode, {"errcode": 310000, "errmsg": "sign not match"}, "310000"),
+    ])
+    def test_business_error_body_raises_named_deterministic_error(monkeypatch, node_cls, body, needle):
+        _patch_post(monkeypatch, body)
+>       with pytest.raises(WebhookBusinessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.notify_backends.WebhookBusinessError'>
+
+tests/test_a2r7_06_webhook_business_codes.py:79: Failed
+_ test_business_error_body_raises_named_deterministic_error[DingtalkWebhookNode-body3-310000] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1078358c0>
+node_cls = <class 'plaita_nodes.webhooks.DingtalkWebhookNode'>
+body = {'errcode': 310000, 'errmsg': 'sign not match'}, needle = '310000'
+
+    @pytest.mark.parametrize("node_cls,body,needle", [
+        (FeishuWebhookNode, {"code": 19003, "msg": "invalid webhook token"}, "19003"),
+        (WecomWebhookNode, {"errcode": 93000, "errmsg": "invalid webhook url"}, "93000"),
+        (SlackWebhookNode, {"ok": False, "error": "invalid_token"}, "invalid_token"),
+        (DingtalkWebhookNode, {"errcode": 310000, "errmsg": "sign not match"}, "310000"),
+    ])
+    def test_business_error_body_raises_named_deterministic_error(monkeypatch, node_cls, body, needle):
+        _patch_post(monkeypatch, body)
+>       with pytest.raises(WebhookBusinessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.notify_backends.WebhookBusinessError'>
+
+tests/test_a2r7_06_webhook_business_codes.py:79: Failed
+________________ test_business_error_message_scrubs_echoed_url _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10782a6d0>
+
+    def test_business_error_message_scrubs_echoed_url(monkeypatch):
+        """业务错误响应体若回显 webhook URL，异常文案同样打码（A2R8-01 纪律）。"""
+        body = {"code": 19003, "msg": f"invalid token {_URL}?token=SECRET123"}
+        _patch_post(monkeypatch, body)
+>       with pytest.raises(WebhookBusinessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.notify_backends.WebhookBusinessError'>
+
+tests/test_a2r7_06_webhook_business_codes.py:112: Failed
+_______________ test_rate_limited_business_code_stays_retryable ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105ccba00>
+
+    def test_rate_limited_business_code_stays_retryable(monkeypatch):
+        _patch_post(monkeypatch, {"code": 9499, "msg": "too many request"})
+>       with pytest.raises(WebhookTransientBusinessError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.notify_backends.WebhookTransientBusinessError'>
+
+tests/test_a2r7_06_webhook_business_codes.py:119: Failed
+_________ test_deterministic_business_error_sent_once_despite_retries __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077e04d0>
+
+    def test_deterministic_business_error_sent_once_despite_retries(monkeypatch):
+        """凭据/签名错误：retry_times=2 仍只发送 1 次，流程具名失败。"""
+        calls = {"n": 0}
+    
+        def _post(*args, **kwargs):
+            calls["n"] += 1
+            return _Resp({"code": 19003, "msg": "invalid webhook token"})
+    
+        monkeypatch.setattr(nb.requests, "post", _post)
+        monkeypatch.setattr(nb, "get_credential", lambda name: {"url": _URL})
+>       with pytest.raises(Exception) as caught:  # NodeExecutionError
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'Exception'>
+
+tests/test_a2r7_06_webhook_business_codes.py:155: Failed
+_______________ test_rate_limited_business_code_retried_to_limit _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077e0650>
+
+    def test_rate_limited_business_code_retried_to_limit(monkeypatch):
+        """限流业务码：1 次首发 + 2 次重试 = 3 次请求（负控下停在 1 次）。"""
+        calls = {"n": 0}
+    
+        def _post(*args, **kwargs):
+            calls["n"] += 1
+            return _Resp({"code": 9499, "msg": "too many request"})
+    
+        monkeypatch.setattr(nb.requests, "post", _post)
+        monkeypatch.setattr(nb, "get_credential", lambda name: {"url": _URL})
+>       with pytest.raises(Exception) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'Exception'>
+
+tests/test_a2r7_06_webhook_business_codes.py:171: Failed
+=========================== short test summary info ============================
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_business_error_body_raises_named_deterministic_error[FeishuWebhookNode-body0-19003]
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_business_error_body_raises_named_deterministic_error[WecomWebhookNode-body1-93000]
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_business_error_body_raises_named_deterministic_error[SlackWebhookNode-body2-invalid_token]
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_business_error_body_raises_named_deterministic_error[DingtalkWebhookNode-body3-310000]
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_business_error_message_scrubs_echoed_url
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_rate_limited_business_code_stays_retryable
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_deterministic_business_error_sent_once_despite_retries
+FAILED tests/test_a2r7_06_webhook_business_codes.py::test_rate_limited_business_code_retried_to_limit
+8 failed, 6 passed in 0.45s

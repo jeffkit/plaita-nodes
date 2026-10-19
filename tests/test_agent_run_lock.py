@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -130,3 +131,56 @@ class TestAgentRunNodePreflight:
         node = AgentRunNode(id="t", agent="echo", prompt="hi", repo=ws)
         node.execute(_EXEC())
         assert captured["key"] == ws
+
+    def test_repo_none_uses_cwd_for_preflight_and_lock(
+            self, agent_config_repo, register_test_echo_executor, monkeypatch):
+        """repo 缺省（默认进程 cwd）与显式 repo 同构：preflight + 遗言锁键（A2R7-08）。
+
+        负控（回退 ``if repo:`` 守卫）：``preflight_calls=0`` 且
+        ``run_lock_key=None``——默认 cwd 的孤儿 agent 对下一次 run 不可见。
+        """
+        import plaita_nodes.agent_run as ar
+        import agentproc.runner as ap_runner
+
+        captured = {}
+        calls = []
+        real_run = ap_runner.run
+        real_preflight = ar.preflight_workspace
+
+        def _spy_run(profile, options):
+            captured["key"] = options.run_lock_key
+            captured["cwd"] = options.cwd
+            return real_run(profile, options)
+
+        def _spy_preflight(workspace, *, run_key=None, grace_secs=10.0):
+            calls.append((workspace, run_key))
+            return real_preflight(workspace, run_key=run_key, grace_secs=grace_secs)
+
+        monkeypatch.setattr(ap_runner, "run", _spy_run)
+        monkeypatch.setattr(ar, "preflight_workspace", _spy_preflight)
+        self._register_echo()
+
+        node = AgentRunNode(id="t", agent="echo", prompt="hi")  # 无 repo
+        out = node.execute(_EXEC())
+
+        cwd = os.getcwd()
+        assert "msg=hi" in out["text"]
+        assert calls == [(cwd, None)], "repo=None 必须对进程 cwd 走 preflight"
+        assert captured["key"] == cwd, "遗言锁键必须锚定默认 cwd"
+        assert captured["cwd"] == cwd, "agent cwd 必须与锁键同一 workspace"
+
+    def test_repo_none_kills_orphan_in_cwd(
+            self, agent_config_repo, register_test_echo_executor):
+        """默认 cwd 里的孤儿 agent 同样被 kill-before-start 清掉（A2R7-08）。"""
+        cwd = os.getcwd()
+        proc = _spawn_session_leader()
+        try:
+            run_lock.write_run_lock(cwd, proc.pid, ["sleep", "60"],
+                                    spawner=_DEAD_SPAWNER_PID)
+            node = AgentRunNode(id="t", agent="echo", prompt="hi")  # 无 repo
+            out = node.execute(_EXEC())
+            assert "msg=hi" in out["text"]
+            assert proc.poll() is not None, "默认 cwd 的孤儿 agent 未被清理"
+            assert not run_lock.lock_path_for(cwd).exists()
+        finally:
+            proc.wait(timeout=15)
