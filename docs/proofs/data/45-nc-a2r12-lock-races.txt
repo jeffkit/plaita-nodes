@@ -2,10 +2,10 @@ FFF                                                                      [100%]
 =================================== FAILURES ===================================
 __ TestConcurrentStreamTurnGate.test_concurrent_stream_turns_second_is_gated ___
 
-self = <test_agent_run_lock_races.TestConcurrentStreamTurnGate object at 0x1079dd090>
-agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_concurrent_stream_turns_s0')
-workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_concurrent_stream_turns_s0/ws')
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af490>
+self = <test_agent_run_lock_races.TestConcurrentStreamTurnGate object at 0x105df5090>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_concurrent_stream_turns_s0')
+workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_concurrent_stream_turns_s0/ws')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105a9f5c0>
 
     def test_concurrent_stream_turns_second_is_gated(
             self, agent_config_repo, workspace, monkeypatch):
@@ -15,6 +15,7 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af490>
     
         real_popen = subprocess.Popen
         a_in_popen = threading.Event()
+        a_pid: list[int] = []
         spawned: list[str] = []
         spawned_lock = threading.Lock()
     
@@ -24,6 +25,7 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af490>
                 spawned.append(argv0)
             proc = real_popen(*args, **kwargs)
             if argv0.startswith("stub-race-a"):
+                a_pid.append(proc.pid)
                 a_in_popen.set()
                 # 放大 Popen→write_run_lock 窗口：无互斥时 B 能在此窗口内也越过
                 # preflight 并再 spawn 一个 agent。
@@ -31,6 +33,19 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af490>
             return proc
     
         monkeypatch.setattr(agent_run_mod.subprocess, "Popen", slow_popen)
+    
+        # CI 的 ps 按终端宽度截断 command 列（Linux 默认 80 列），pytest 的 tmp
+        # 路径较长会把桩脚本 basename 截掉 → agentproc 误判 pid-reused 并删掉
+        # live 锁（既有 test_agent_run_stream 同样钉住身份探测）。这里只钉 A 的
+        # 身份，聚焦本仓契约：A 的 live 锁必须让 B 在 preflight 被拒。
+        real_ps_fields = run_lock._ps_fields
+    
+        def ps_fields(pid):
+            if a_pid and pid == a_pid[0]:
+                return str(pid), "stub-race-a.sh"
+            return real_ps_fields(pid)
+    
+        monkeypatch.setattr(run_lock, "_ps_fields", ps_fields)
     
         results: dict[str, dict] = {}
     
@@ -58,16 +73,16 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af490>
 E       AssertionError: 第二个 stream 未被闸：{'ok': True}
 E       assert False
 E        +  where False = isinstance(None, AgentRunError)
-E        +    where None = <built-in method get of dict object at 0x107af59c0>('error')
-E        +      where <built-in method get of dict object at 0x107af59c0> = {'ok': True}.get
+E        +    where None = <built-in method get of dict object at 0x105fe2b40>('error')
+E        +      where <built-in method get of dict object at 0x105fe2b40> = {'ok': True}.get
 
-tests/test_agent_run_lock_races.py:139: AssertionError
+tests/test_agent_run_lock_races.py:154: AssertionError
 _________ TestClearRunLockOwnership.test_late_clear_keeps_sibling_lock _________
 
-self = <test_agent_run_lock_races.TestClearRunLockOwnership object at 0x1079dd450>
-agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0')
-workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0/ws')
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af5c0>
+self = <test_agent_run_lock_races.TestClearRunLockOwnership object at 0x105df5450>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_late_clear_keeps_sibling_0')
+workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_late_clear_keeps_sibling_0/ws')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105a9f6f0>
 
     def test_late_clear_keeps_sibling_lock(
             self, agent_config_repo, workspace, monkeypatch):
@@ -142,17 +157,17 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1077af5c0>
 E               AssertionError: A 的迟到收尾把 B 重建的锁删了（B 的 agent 仍存活）
 E               assert False
 E                +  where False = exists()
-E                +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0/locks/69bb878148f8d1780cc54ef326e4eae2.json').exists
+E                +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_late_clear_keeps_sibling_0/locks/169334bf6fb836bad80ea72b54f2e1cb.json').exists
 
-tests/test_agent_run_lock_races.py:216: AssertionError
+tests/test_agent_run_lock_races.py:231: AssertionError
 ------------------------------ Captured log call -------------------------------
-WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_late_clear_keeps_sibling_0/ws run_key=race action=stale pid=52840 command=
+WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_late_clear_keeps_sibling_0/ws run_key=race action=stale pid=77624 command=
 _____ TestStaleCleanupRace.test_stale_cleanup_does_not_delete_rebuilt_lock _____
 
-self = <test_agent_run_lock_races.TestStaleCleanupRace object at 0x1079dd590>
-agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0')
-workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/ws')
-monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107ae4710>
+self = <test_agent_run_lock_races.TestStaleCleanupRace object at 0x105df5590>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_stale_cleanup_does_not_de0')
+workspace = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_stale_cleanup_does_not_de0/ws')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105fd8830>
 
     def test_stale_cleanup_does_not_delete_rebuilt_lock(
             self, agent_config_repo, workspace, monkeypatch):
@@ -224,14 +239,14 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107ae4710>
 E       AssertionError: 慢 preflight 的迟到 unlink 删除了快 run 重建的新锁（活进程无锁）
 E       assert False
 E        +  where False = exists()
-E        +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/locks/acdd6bc6164bc47d114682cb0d735f2b.json').exists
+E        +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_stale_cleanup_does_not_de0/locks/057b4365e37211cd6658bf014e4e9ba4.json').exists
 
-tests/test_agent_run_lock_races.py:298: AssertionError
+tests/test_agent_run_lock_races.py:313: AssertionError
 ------------------------------ Captured log call -------------------------------
-WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/ws run_key=race action=stale pid=52844 command=
-WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4118/test_stale_cleanup_does_not_de0/ws run_key=race action=stale pid=52844 command=
+WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_stale_cleanup_does_not_de0/ws run_key=race action=stale pid=77628 command=
+WARNING  plaita_nodes.agent_run:agent_run.py:142 preflight 清理孤儿 agent：workspace=/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4133/test_stale_cleanup_does_not_de0/ws run_key=race action=stale pid=77628 command=
 =========================== short test summary info ============================
 FAILED tests/test_agent_run_lock_races.py::TestConcurrentStreamTurnGate::test_concurrent_stream_turns_second_is_gated
 FAILED tests/test_agent_run_lock_races.py::TestClearRunLockOwnership::test_late_clear_keeps_sibling_lock
 FAILED tests/test_agent_run_lock_races.py::TestStaleCleanupRace::test_stale_cleanup_does_not_delete_rebuilt_lock
-3 failed in 4.26s
+3 failed in 4.08s

@@ -98,6 +98,7 @@ class TestConcurrentStreamTurnGate:
 
         real_popen = subprocess.Popen
         a_in_popen = threading.Event()
+        a_pid: list[int] = []
         spawned: list[str] = []
         spawned_lock = threading.Lock()
 
@@ -107,6 +108,7 @@ class TestConcurrentStreamTurnGate:
                 spawned.append(argv0)
             proc = real_popen(*args, **kwargs)
             if argv0.startswith("stub-race-a"):
+                a_pid.append(proc.pid)
                 a_in_popen.set()
                 # 放大 Popen→write_run_lock 窗口：无互斥时 B 能在此窗口内也越过
                 # preflight 并再 spawn 一个 agent。
@@ -114,6 +116,19 @@ class TestConcurrentStreamTurnGate:
             return proc
 
         monkeypatch.setattr(agent_run_mod.subprocess, "Popen", slow_popen)
+
+        # CI 的 ps 按终端宽度截断 command 列（Linux 默认 80 列），pytest 的 tmp
+        # 路径较长会把桩脚本 basename 截掉 → agentproc 误判 pid-reused 并删掉
+        # live 锁（既有 test_agent_run_stream 同样钉住身份探测）。这里只钉 A 的
+        # 身份，聚焦本仓契约：A 的 live 锁必须让 B 在 preflight 被拒。
+        real_ps_fields = run_lock._ps_fields
+
+        def ps_fields(pid):
+            if a_pid and pid == a_pid[0]:
+                return str(pid), "stub-race-a.sh"
+            return real_ps_fields(pid)
+
+        monkeypatch.setattr(run_lock, "_ps_fields", ps_fields)
 
         results: dict[str, dict] = {}
 

@@ -44,7 +44,7 @@
 
 ```text
 $ cp src/plaita_nodes/agent_run.py /tmp/agent_run_fixed_r45.py
-$ git checkout -- src/plaita_nodes/agent_run.py     # 回到 2bdddd7
+$ git show 2bdddd7:src/plaita_nodes/agent_run.py > src/plaita_nodes/agent_run.py
 $ pytest -q tests/test_agent_run_lock_races.py
 FAILED TestConcurrentStreamTurnGate::test_concurrent_stream_turns_second_is_gated
   AssertionError: 第二个 stream 未被闸：{'ok': True}
@@ -58,7 +58,7 @@ FAILED TestStaleCleanupRace::test_stale_cleanup_does_not_delete_rebuilt_lock
   AssertionError: 慢 preflight 的迟到 unlink 删除了快 run 重建的新锁（活进程无锁）
   assert False = exists()  # .../<sha>.json
 
-3 failed in 4.26s
+3 failed in 4.08s
 ```
 
 三条红分别对应规格里的三个负控观察：
@@ -89,6 +89,13 @@ $ pytest -q
 说明：本机 editable 的 plaita 主 checkout 停在 `37434a0`（早于 r44 的
 `a43f710`），直接跑全量会红 `test_issue9_report_run_token`；这与本轮改动无关。
 按 r44 的口径把 `PYTHONPATH` 指向 plaita wt3 后全量绿。
+
+并发闸用例钉住了 A 的身份探测：Linux procps 的 `ps -o command=` 会按终端宽度
+截断 command 列，pytest tmp 路径下桩脚本 basename 可能被截掉，agentproc 会
+把 live 锁误判成 `pid-reused`——既有 `test_agent_run_stream` 已按同样方式
+处理。该钉扎不改变被测契约：无 guard 时 B 在 A 落锁前越过 preflight（clean），
+有 guard 时 B 必须等 A 落锁后才检查（live→Busy）。真实 console 的 agent
+argv0 是短命令名，不受此测试装置影响。
 
 回归面：
 
