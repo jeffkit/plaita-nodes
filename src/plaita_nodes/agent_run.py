@@ -24,7 +24,8 @@ agentproc runner 仍是唯一执行者；密钥只经 envfile 进容器，回传
 多租户 fail-closed（#5）：租户上下文非 default 时 ``repo`` 直跑默认拒绝
 （``PLAITA_ALLOW_HOST_AGENT_RUN=1`` 由部署方显式放开）——直跑是 agent CLI 在
 worker 宿主上免审批执行，只有沙箱才有 VM 边界。流式辅助路径
-``recursive_stream_turn`` 的宿主 env 同样经白名单重建。
+``recursive_stream_turn`` 同样在 Popen 前按 ``_tenant_guard`` 具名拒绝
+（pn#20），其宿主 env 也经白名单重建。
 """
 from __future__ import annotations
 
@@ -42,6 +43,7 @@ from plaita import Node
 
 from ._retry import DeterministicError
 from ._subprocess_env import build_subprocess_env
+from ._tenant_guard import refuse_non_default_tenant
 from .config import EXECUTOR_ALIASES, resolve_agent
 
 
@@ -715,7 +717,13 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     供宿主进程（如 plaita-console 的 AI 流程生成）把编码 Agent 作为生成后端复用。
     消费方提前关闭生成器（SSE 断连 / ``gen.close()``）会终止 agent 进程组，
     确认终态后才释放遗言锁（#19）。
+
+    pn#20：流式路径与非流式路径同构——非 default 租户在 ``Popen`` 之前具名
+    拒绝（fail-closed）。流式宿主同样在 worker 宿主上免审批执行 agent CLI，
+    不能因为调用面不同就绕过租户闸。
     """
+    refuse_non_default_tenant("recursive_stream_turn")
+
     import time as _time
 
     workspace_abs = os.path.abspath(workspace)

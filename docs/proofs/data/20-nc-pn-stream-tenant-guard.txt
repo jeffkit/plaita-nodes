@@ -1,0 +1,124 @@
+FF.                                                                      [100%]
+=================================== FAILURES ===================================
+_________________ test_non_default_tenant_refused_before_popen _________________
+
+tenant_acme = 'acme'
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3985/test_non_default_tenant_refuse0')
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3985/test_non_default_tenant_refuse0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107b855b0>
+
+    def test_non_default_tenant_refused_before_popen(
+            tenant_acme, agent_config_repo, tmp_path, monkeypatch):
+        """非 default 租户：Popen / preflight / 凭据解析全部零执行。"""
+        stub = agent_config_repo / "stub-issue20-deny.sh"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-issue20-deny")
+    
+        touched: list[str] = []
+    
+        def _popen(*args, **kwargs):  # noqa: ARG001
+            touched.append("popen")
+            raise AssertionError("Popen 不得在租户闸之前被调用")
+    
+        def _preflight(*args, **kwargs):  # noqa: ARG001
+            touched.append("preflight")
+    
+        def _resolve(*args, **kwargs):  # noqa: ARG001
+            touched.append("resolve_agent")
+    
+        monkeypatch.setattr(agent_run_mod.subprocess, "Popen", _popen)
+        monkeypatch.setattr(agent_run_mod, "preflight_workspace", _preflight)
+        monkeypatch.setattr(agent_run_mod, "resolve_agent", _resolve)
+    
+        with pytest.raises(TenantContextPropagationError) as exc:
+>           list(recursive_stream_turn(
+                "hi", workspace=str(tmp_path), profile="rec-issue20-deny"))
+
+tests/test_issue20_stream_tenant_guard.py:73: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+task = 'hi'
+workspace = '/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3985/test_non_default_tenant_refuse0'
+profile = 'rec-issue20-deny', model = None, max_steps = None
+timeout_secs = 1800, run_key = None
+
+    def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
+                              model: Optional[str] = None,
+                              max_steps: Optional[int] = None,
+                              timeout_secs: int = 1800,
+                              run_key: Optional[str] = None):
+        """以流式方式跑一轮 recursive Agent（生成器：yield 事件 dict）。
+    
+        事件序列：
+            {"type": "line", "text": str}            # agent 原始输出行（宿主可实时展示）
+            {"type": "done", "ok": bool, "result": str, "error": str}
+        供宿主进程（如 plaita-console 的 AI 流程生成）把编码 Agent 作为生成后端复用。
+        消费方提前关闭生成器（SSE 断连 / ``gen.close()``）会终止 agent 进程组，
+        确认终态后才释放遗言锁（#19）。
+    
+        pn#20：流式路径与非流式路径同构——非 default 租户在 ``Popen`` 之前具名
+        拒绝（fail-closed）。流式宿主同样在 worker 宿主上免审批执行 agent CLI，
+        不能因为调用面不同就绕过租户闸。
+        """
+        import time as _time
+    
+        workspace_abs = os.path.abspath(workspace)
+        # 无 execution 上下文的宿主（console）：默认以宿主进程为 run 身份，避免两个
+        # console 进程同 workspace 互相当孤儿杀；需要跨重启清场时由宿主显式传稳定 run_key。
+        scope = run_key or f"host-{os.getpid()}"
+        lock_key = _run_lock_key(workspace_abs, scope)
+        preflight_workspace(workspace_abs, run_key=scope)
+    
+        register_recursive_direct()
+        agent = resolve_agent(profile)
+>       env_extra = dict(agent["env"])
+                         ^^^^^^^^^^^^
+E       TypeError: 'NoneType' object is not subscriptable
+
+src/plaita_nodes/agent_run.py:736: TypeError
+_______________ test_guard_applies_even_if_host_run_opt_out_set ________________
+
+tenant_acme = 'acme'
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3985/test_guard_applies_even_if_hos0')
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3985/test_guard_applies_even_if_hos0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107b85480>
+
+    def test_guard_applies_even_if_host_run_opt_out_set(
+            tenant_acme, agent_config_repo, tmp_path, monkeypatch):
+        """流式闸独立于非流式的部署 opt-out：多租户下不会因环境变量放行。"""
+        stub = agent_config_repo / "stub-issue20-optout.sh"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-issue20-optout")
+    
+        monkeypatch.setenv("PLAITA_ALLOW_HOST_AGENT_RUN", "1")
+        monkeypatch.setattr(
+            agent_run_mod.subprocess, "Popen",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("Popen 不得被调用")),
+        )
+    
+        with pytest.raises(TenantContextPropagationError, match=TENANT_ISOLATION_MARKER):
+>           list(recursive_stream_turn(
+                "hi", workspace=str(tmp_path), profile="rec-issue20-optout"))
+
+tests/test_issue20_stream_tenant_guard.py:96: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/plaita_nodes/agent_run.py:748: in recursive_stream_turn
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+tests/test_issue20_stream_tenant_guard.py:92: in <lambda>
+    lambda *a, **kw: (_ for _ in ()).throw(AssertionError("Popen 不得被调用")),
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <tuple_iterator object at 0x106cdc850>
+
+>       lambda *a, **kw: (_ for _ in ()).throw(AssertionError("Popen 不得被调用")),
+    )
+E   AssertionError: Popen 不得被调用
+
+tests/test_issue20_stream_tenant_guard.py:92: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_issue20_stream_tenant_guard.py::test_non_default_tenant_refused_before_popen
+FAILED tests/test_issue20_stream_tenant_guard.py::test_guard_applies_even_if_host_run_opt_out_set
+2 failed, 1 passed in 0.84s
