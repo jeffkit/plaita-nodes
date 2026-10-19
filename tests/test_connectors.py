@@ -249,6 +249,18 @@ def test_sql_query_limits_must_be_positive(monkeypatch, tmp_path, field):
                   query="SELECT id FROM lim")
 
 
+@pytest.mark.parametrize("field", ["max_rows", "max_bytes"])
+@pytest.mark.parametrize("value", [-1, "0"])
+def test_sql_query_limits_reject_non_positive_named_error(monkeypatch, tmp_path, field, value):
+    """非正上限（负数/字符串 0）同样具名拒绝，不静默夹成 1（#205 续）。"""
+    cred = _sqlite_rows(monkeypatch, tmp_path, 1, table="limneg")
+    with pytest.raises(Exception, match=field) as ei:
+        _run_node("sql_query", credential=cred, **{field: value},
+                  query="SELECT id FROM limneg")
+    # 执行器会把节点内异常包成 NodeExecutionError；原始异常必须是具名 ValueError
+    assert isinstance(ei.value.__cause__, ValueError)
+
+
 def test_sql_query_default_limits():
     from plaita_nodes.database import SqlQueryNode
 

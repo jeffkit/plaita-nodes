@@ -9,7 +9,8 @@
 SELECT 返回 {"rows": [...], "rowcount": n}；写操作返回 {"rowcount": n}。
 **结果上限**（plaita#205）：``max_rows`` 默认 1000、``max_bytes`` 默认
 4 MiB（按行 JSON 编码累计）；超限抛 :class:`SqlResultLimitError`
-（fail-closed，不返回部分结果——静默截断会让下游算错）。
+（fail-closed，不返回部分结果——静默截断会让下游算错）。两个上限必须为
+正整数，显式 0/负值抛 ``ValueError``（不静默夹成 1）。
 dry-run（节点字段或 globalContext.dry_run）直接返回 {"rows": [], "rowcount": 0, "dry_run": True}，不解析凭据不连库。
 """
 from __future__ import annotations
@@ -48,7 +49,7 @@ class SqlResultLimitError(RuntimeError):
         super().__init__(
             f"sql_query 结果超过上限（max_rows={max_rows}, max_bytes={max_bytes}）："
             f"已读取 {observed_rows} 行 / {observed_bytes} 字节；"
-            "拒绝返回部分结果（fail-closed）。请在 SQL 中加 WHERE/LIMIT 缩小结果，"
+            "拒绝返回部分结果（不静默截断，fail-closed）。请在 SQL 中加 WHERE/LIMIT 缩小结果，"
             "或显式调大节点的 max_rows/max_bytes。"
         )
         self.max_rows = max_rows
@@ -96,6 +97,23 @@ def _resolve(execution, value: Any) -> Any:
     return value
 
 
+def _positive_limit(name: str, value: Any) -> int:
+    """校验节点上限字段为正整数；非正值 fail-closed 拒绝（#205 续）。
+
+    显式 0/负值原先被 ``max(1, ...)`` 静默夹成 1，配置写错却像正常执行；
+    这里改为带字段名的 ``ValueError``，让错误在凭据解析/连库之前暴露。
+    """
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name} 必须为正整数（收到 {value!r}）") from e
+    if limit <= 0:
+        raise ValueError(
+            f"{name} 必须为正整数（收到 {value!r}）；非正值 fail-closed 拒绝执行"
+        )
+    return limit
+
+
 class SqlQueryNode(Node):
     """SQL 查询：对凭据指向的数据库执行 SQL。
 
@@ -121,6 +139,9 @@ class SqlQueryNode(Node):
         # dry-run 最先判：不解析凭据、不连库（params 可能含敏感值，dry 下不碰）
         if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
             return {"rows": [], "rowcount": 0, "dry_run": True}
+        # 上限配置错误先于任何凭据解析/连库暴露；不静默夹取（#205 续）
+        row_limit = _positive_limit("max_rows", self.max_rows)
+        byte_limit = _positive_limit("max_bytes", self.max_bytes)
         if not self.credential:
             raise ValueError("缺少 credential 字段：请填凭据名（编排台「凭据」页创建）")
         url = _compose_url(get_credential(self.credential))
@@ -133,8 +154,6 @@ class SqlQueryNode(Node):
         bind = {k: _resolve(execution, v) for k, v in (self.params or {}).items()}
 
         engine = _get_engine(url)
-        row_limit = max(1, int(self.max_rows))
-        byte_limit = max(1, int(self.max_bytes))
         with engine.begin() as conn:
             result = conn.execute(
                 text(sql).execution_options(stream_results=True), bind or {}
