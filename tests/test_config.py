@@ -73,3 +73,67 @@ def test_resolve_agent_locked_executor_rejects_provider(agent_config_repo: Path,
 def test_resolve_agent_missing(agent_config_repo: Path):
     with pytest.raises(AgentConfigError, match="no-such"):
         resolve_agent("no-such", repo=str(agent_config_repo))
+
+
+# ---- #6：遗留 keyEnv 回退（environ=None 时曾退化成空 dict）----
+
+def _write_keyenv_provider(repo: Path, *, api_key: str | None = None,
+                           provider: str = "glm-52") -> None:
+    bundle = {
+        "type": "anthropic",
+        "apiBase": "https://legacy.example/api",
+        "model": "GLM-5.2",
+        "keyEnv": "TEST_PROVIDER_KEY",
+    }
+    if api_key is not None:
+        bundle["apiKey"] = api_key
+    (repo / ".flowcast" / "providers.json").write_text(
+        json.dumps({"providers": {provider: bundle}}), encoding="utf-8")
+
+
+def test_resolve_provider_key_env_reads_host_environ(agent_config_repo: Path, monkeypatch):
+    """environ=None（生产默认）→ keyEnv 读宿主 os.environ，不再恒为空串。"""
+    _write_keyenv_provider(agent_config_repo)
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-keyenv")
+    providers = load_merged_config("providers", repo=str(agent_config_repo))
+    assert resolve_provider("glm-52", providers)["apiKey"] == "sk-keyenv"
+
+
+def test_resolve_provider_key_env_explicit_environ_wins(agent_config_repo: Path, monkeypatch):
+    _write_keyenv_provider(agent_config_repo)
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-host")
+    providers = load_merged_config("providers", repo=str(agent_config_repo))
+    bundle = resolve_provider(
+        "glm-52", providers, environ={"TEST_PROVIDER_KEY": "sk-explicit"})
+    assert bundle["apiKey"] == "sk-explicit"
+
+
+def test_resolve_provider_api_key_wins_over_key_env(agent_config_repo: Path, monkeypatch):
+    _write_keyenv_provider(agent_config_repo, api_key="sk-inline")
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-env")
+    providers = load_merged_config("providers", repo=str(agent_config_repo))
+    assert resolve_provider("glm-52", providers)["apiKey"] == "sk-inline"
+
+
+def test_resolve_provider_key_env_missing_fails_fast(agent_config_repo: Path, monkeypatch):
+    _write_keyenv_provider(agent_config_repo)
+    monkeypatch.delenv("TEST_PROVIDER_KEY", raising=False)
+    providers = load_merged_config("providers", repo=str(agent_config_repo))
+    with pytest.raises(AgentConfigError, match="TEST_PROVIDER_KEY.*未设置"):
+        resolve_provider("glm-52", providers)
+
+
+def test_resolve_provider_key_env_empty_fails_fast(agent_config_repo: Path, monkeypatch):
+    _write_keyenv_provider(agent_config_repo)
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "")
+    providers = load_merged_config("providers", repo=str(agent_config_repo))
+    with pytest.raises(AgentConfigError, match="TEST_PROVIDER_KEY.*为空"):
+        resolve_provider("glm-52", providers)
+
+
+def test_resolve_agent_key_env_translates_to_recursive_env(agent_config_repo: Path, monkeypatch):
+    """生产路径：agents.json → provider.keyEnv → RECURSIVE_API_KEY。"""
+    _write_keyenv_provider(agent_config_repo)
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-keyenv")
+    profile = resolve_agent("glm-52", repo=str(agent_config_repo))
+    assert profile["env"]["RECURSIVE_API_KEY"] == "sk-keyenv"

@@ -98,12 +98,27 @@ def resolve_provider(name: str, providers: Dict[str, Any], environ: Optional[Dic
     if not raw:
         raise AgentConfigError(f"provider '{name}' 不存在（检查 providers.json）")
     bundle = interpolate(raw, environ)
+    api_key = bundle.get("apiKey")
+    key_env = bundle.get("keyEnv")
+    if not api_key and key_env:
+        # 与 interpolate 同源：environ=None 表示宿主进程环境。旧实现退化成
+        # 空 dict，旧 flowcast 配置的 keyEnv 回退永远拿到空串（#6）。
+        env = environ if environ is not None else os.environ
+        if str(key_env) not in env:
+            raise AgentConfigError(
+                f"provider '{name}' 声明的 keyEnv '{key_env}' 未设置"
+                f"（环境变量缺失，apiKey 无法解析）")
+        api_key = env[str(key_env)]
+        if not api_key:
+            raise AgentConfigError(
+                f"provider '{name}' 的 keyEnv '{key_env}' 为空"
+                f"（apiKey 无法解析）")
     return {
         "name": name,
         "type": bundle.get("type", "openai"),
         "apiBase": bundle.get("apiBase") or bundle.get("base") or "",
         "model": bundle.get("model"),
-        "apiKey": bundle.get("apiKey") or (environ or {}).get(bundle.get("keyEnv") or "", ""),
+        "apiKey": api_key or "",
     }
 
 
