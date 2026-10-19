@@ -877,7 +877,21 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, cwd=workspace, env=proc_env,
                                 start_new_session=True)
-        _run_lock.write_run_lock(lock_key, proc.pid, argv)
+        try:
+            _run_lock.write_run_lock(lock_key, proc.pid, argv)
+        except BaseException:
+            # A2R12-03：Popen 已成功但写锁失败（磁盘满/权限/注入异常）时，
+            # 旧实现的 finally 尚未建立 → agent 继续跑且没有遗言锁，成为
+            # 下一次 preflight 看不见的无锁孤儿。先终止并回收进程组，再
+            # 按 pid 归属清掉可能已落盘的半截锁，最后原样抛出。
+            _log.error("流式 agent 写遗言锁失败，终止已 spawn 的进程组 pid=%s"
+                       "（workspace=%s）", proc.pid, workspace_abs)
+            _kill_process_group(proc)
+            try:
+                _clear_run_lock_owned(lock_key, proc.pid)
+            except Exception as exc:  # noqa: BLE001 — 不掩盖原始写锁异常
+                _log.warning("写锁失败后的清锁异常（保留给 preflight）：%s", exc)
+            raise
     try:
         yield from _stream_turn_body(proc, timeout_secs)
     finally:
@@ -929,32 +943,47 @@ def _stream_turn_body(proc: subprocess.Popen, timeout_secs: int):
         except (ValueError, OSError):
             pass
 
+    finished = threading.Event()
+
     def _enforce_deadline() -> None:
         # 看门狗线程：deadline 到而进程仍在跑 → 击杀整个进程组。逐行读
         # stdout 只在行到达时才有机会检查 deadline，进程无输出挂死时
         # 只有这条路能保证调用方不永久阻塞。
+        #
+        # 正常完成时必须立刻退出（A2R11-06）：旧实现无条件 sleep(remaining)，
+        # 短流的每次正常完成都会把线程睡满 timeout_secs（默认 1800s），
+        # console 高频生成按 turn 线性累积。
         remaining = deadline - _time.monotonic()
-        if remaining > 0:
-            _time.sleep(remaining)
+        if remaining > 0 and finished.wait(remaining):
+            return
+        if finished.is_set():
+            return
         if proc.poll() is None:
             timed_out["flag"] = True
             _kill_process_group(proc)
 
     threading.Thread(target=_drain_stderr, daemon=True).start()
-    threading.Thread(target=_enforce_deadline, daemon=True).start()
-
-    for line in proc.stdout:  # type: ignore[union-attr]
-        yield {"type": "line", "text": line.rstrip("\n")}
-        lines.append(line)
-
-    # stdout EOF 后等退出，仍受 deadline 约束（历史实现 proc.wait() 无限等、
-    # timed_out 在 wait 之后才判——进程挂死时调用方永久阻塞且超时形同虚设）。
-    # 看门狗击杀后 stdout 同样 EOF，wait 会立即返回被杀退出码。
+    watchdog = threading.Thread(target=_enforce_deadline, daemon=True)
+    watchdog.start()
     try:
-        proc.wait(timeout=max(deadline - _time.monotonic(), 0.0))
-    except subprocess.TimeoutExpired:
-        timed_out["flag"] = True
-        _kill_process_group(proc)
+        for line in proc.stdout:  # type: ignore[union-attr]
+            yield {"type": "line", "text": line.rstrip("\n")}
+            lines.append(line)
+
+        # stdout EOF 后等退出，仍受 deadline 约束（历史实现 proc.wait() 无限等、
+        # timed_out 在 wait 之后才判——进程挂死时调用方永久阻塞且超时形同虚设）。
+        # 看门狗击杀后 stdout 同样 EOF，wait 会立即返回被杀退出码。
+        try:
+            proc.wait(timeout=max(deadline - _time.monotonic(), 0.0))
+        except subprocess.TimeoutExpired:
+            timed_out["flag"] = True
+            _kill_process_group(proc)
+    finally:
+        # 正常完成 / 消费者提前 close：唤醒看门狗并短 join，线程不按
+        # timeout_secs 滞留。看门狗若已在 killpg 中，join 超时也不影响
+        # 终止语义（daemon 线程，且 killpg 自身有界）。
+        finished.set()
+        watchdog.join(timeout=1.0)
 
     stdout = "".join(lines)
     if timed_out["flag"]:

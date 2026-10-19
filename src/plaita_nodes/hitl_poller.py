@@ -27,7 +27,6 @@ import argparse
 import asyncio
 import json
 import os
-import stat
 import sys
 import tempfile
 import time
@@ -91,20 +90,50 @@ def _load_sessions(path: Path) -> dict | None:
     return data
 
 
-def _write_sessions_atomic(path: Path, sessions: dict) -> None:
-    """同目录临时文件 + fsync + os.replace；失败清理临时文件、目标不变。"""
+def _sweep_stale_tmp(path: Path, *, max_age_secs: float = 300.0) -> None:
+    """清扫同目录下本文件的过龄临时文件（SIGKILL/掉电残留）。
+
+    原子写只在 Python 异常路径 unlink；进程被 SIGKILL 时
+    ``.<name>.*.tmp`` 会带着完整 sessions 内容留存。只删超过
+    ``max_age_secs`` 的条目：并发写者的临时文件只存活毫秒级，年龄门槛
+    避免误删正在 replace 的 tmp。
+    """
     target = Path(path)
+    cutoff = time.time() - max_age_secs
+    try:
+        candidates = list(target.parent.glob(f".{target.name}.*.tmp"))
+    except OSError as exc:
+        print(f"⚠️ 扫描临时文件失败（{target}）：{exc}", file=sys.stderr)
+        return
+    for candidate in candidates:
+        try:
+            if candidate.stat().st_mtime <= cutoff:
+                candidate.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"⚠️ 清理临时文件失败（{candidate}）：{exc}", file=sys.stderr)
+
+
+def _write_sessions_atomic(path: Path, sessions: dict) -> None:
+    """同目录临时文件 + fsync + os.replace；失败清理临时文件、目标不变。
+
+    临时文件从创建到替换始终保持 0600：旧实现在 replace 前把 tmp chmod
+    成目标权限（常见 0644），SIGKILL 落在 chmod 后/替换前就会留下与目标
+    同权限、含完整内容的残留（A2R11-08）。替换后目标继承 0600。
+    """
+    target = Path(path)
+    _sweep_stale_tmp(target)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
     tmp = Path(tmp_name)
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(sessions, fh, ensure_ascii=False, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
-        if target.exists():
-            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
         os.replace(tmp, target)
     except BaseException:
         try:
@@ -168,6 +197,9 @@ def poll_round(sessions_path: Path, hitl_url: str, bus) -> list[dict]:
             published.append(execution_id)
     if published:
         _drop_published_sessions(sessions_path, published)
+        # session 结束（终态已发布）顺手清扫 SIGKILL 残留；即使本轮没有
+        # 触发写回（条目已被并发清掉），残留也在这里回收。
+        _sweep_stale_tmp(sessions_path)
     return events
 
 
@@ -184,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     if sessions is None:
         return 1
     if not sessions:
+        _sweep_stale_tmp(sessions_path)
         print("无可轮询 session，退出")
         return 0
 

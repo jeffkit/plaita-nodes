@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import threading
 
 import pytest
@@ -300,3 +301,98 @@ class TestConsumerCloseTerminatesAgent:
         assert events[-1]["ok"] is True
         assert killed == [], "正常完成不应击杀进程"
         assert not lock_file.exists(), "正常完成仍按原语义释放锁"
+
+
+def _watchdog_threads() -> list[threading.Thread]:
+    """当前存活的 deadline 看门狗线程（按 target 名识别）。"""
+    return [t for t in threading.enumerate()
+            if getattr(getattr(t, "_target", None), "__name__", "") == "_enforce_deadline"]
+
+
+class TestWatchdogThreadLifecycle:
+    """A2R11-06：看门狗线程不得按 timeout_secs 滞留。
+
+    旧实现 ``_enforce_deadline`` 无条件 ``sleep(remaining)``，正常完成的短
+    turn 也会把线程睡满 ``timeout_secs``；console 高频生成时逐 turn 累积。
+    """
+
+    def test_normal_completion_does_not_leak_watchdog_threads(
+            self, agent_config_repo, tmp_path):
+        stub = agent_config_repo / "stub-watchdog.sh"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' '{\"result\": \"ok\", \"is_error\": false}'\n"
+        )
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-watchdog")
+
+        baseline = len(_watchdog_threads())
+        for _ in range(3):
+            events = _drain_generator(recursive_stream_turn(
+                "hi", workspace=str(tmp_path), profile="rec-watchdog",
+                timeout_secs=60))
+            assert events[-1]["ok"] is True
+
+        alive = _watchdog_threads()
+        assert len(alive) == baseline, (
+            f"3 个正常完成的短 turn 后仍有 {len(alive) - baseline} 条 "
+            "_enforce_deadline 线程存活（会一直睡到 timeout_secs=60）")
+
+
+class TestLockWriteFailureCleanup:
+    """A2R12-03：Popen 成功后写遗言锁失败必须回收已 spawn 的 agent。
+
+    旧实现的 ``Popen``/``write_run_lock`` 在 try 之外；写锁抛非 OSError
+    异常时 finally 尚未建立 → agent 继续运行且没有遗言锁（无锁孤儿）。
+    """
+
+    def test_write_lock_failure_kills_spawned_agent(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        stub = agent_config_repo / "stub-lock-fail.sh"
+        stub.write_text("#!/bin/sh\necho started\nsleep 30\n")
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-lock-fail")
+
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def recording_popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        monkeypatch.setattr(agent_run_mod.subprocess, "Popen", recording_popen)
+
+        from agentproc import run_lock as agentproc_run_lock
+
+        def raising_write(*args, **kwargs):
+            raise RuntimeError("injected: lock write failed after Popen")
+
+        monkeypatch.setattr(agentproc_run_lock, "write_run_lock", raising_write)
+        lock_key = _run_lock_key(os.path.abspath(str(tmp_path)), "t-lock-fail")
+        lock_file = lock_path_for(lock_key)
+
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-lock-fail",
+            timeout_secs=60, run_key="t-lock-fail")
+        try:
+            with pytest.raises(RuntimeError, match="lock write failed"):
+                next(gen)
+            assert spawned, "Popen 应在写锁前成功"
+            proc = spawned[0]
+            assert proc.poll() is not None, (
+                "写锁失败后已 spawn 的 agent 必须被终止并回收（否则是无锁孤儿）")
+            assert not lock_file.exists(), "写锁失败不得留下锁文件"
+        finally:
+            for proc in spawned:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:  # noqa: BLE001 — 清理不掩盖断言失败
+                        pass
+            lock_file.unlink(missing_ok=True)

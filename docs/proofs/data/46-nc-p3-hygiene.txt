@@ -1,0 +1,406 @@
+FFFFFFFFFFFFFFFFFF.F                                                     [100%]
+=================================== FAILURES ===================================
+_ TestWatchdogThreadLifecycle.test_normal_completion_does_not_leak_watchdog_threads _
+
+self = <test_agent_run_stream.TestWatchdogThreadLifecycle object at 0x105da9090>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_normal_completion_does_no0')
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_normal_completion_does_no0')
+
+    def test_normal_completion_does_not_leak_watchdog_threads(
+            self, agent_config_repo, tmp_path):
+        stub = agent_config_repo / "stub-watchdog.sh"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' '{\"result\": \"ok\", \"is_error\": false}'\n"
+        )
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-watchdog")
+    
+        baseline = len(_watchdog_threads())
+        for _ in range(3):
+            events = _drain_generator(recursive_stream_turn(
+                "hi", workspace=str(tmp_path), profile="rec-watchdog",
+                timeout_secs=60))
+            assert events[-1]["ok"] is True
+    
+        alive = _watchdog_threads()
+>       assert len(alive) == baseline, (
+            f"3 个正常完成的短 turn 后仍有 {len(alive) - baseline} 条 "
+            "_enforce_deadline 线程存活（会一直睡到 timeout_secs=60）")
+E       AssertionError: 3 个正常完成的短 turn 后仍有 3 条 _enforce_deadline 线程存活（会一直睡到 timeout_secs=60）
+E       assert 3 == 0
+E        +  where 3 = len([<Thread(Thread-3 (_enforce_deadline), started daemon 6182858752)>, <Thread(Thread-6 (_enforce_deadline), started daemon 6199685120)>, <Thread(Thread-9 (_enforce_deadline), started daemon 6216511488)>])
+
+tests/test_agent_run_stream.py:337: AssertionError
+___ TestLockWriteFailureCleanup.test_write_lock_failure_kills_spawned_agent ____
+
+self = <test_agent_run_stream.TestLockWriteFailureCleanup object at 0x105da91d0>
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_write_lock_failure_kills_0')
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_write_lock_failure_kills_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x105d06b10>
+
+    def test_write_lock_failure_kills_spawned_agent(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        stub = agent_config_repo / "stub-lock-fail.sh"
+        stub.write_text("#!/bin/sh\necho started\nsleep 30\n")
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-lock-fail")
+    
+        spawned = []
+        real_popen = subprocess.Popen
+    
+        def recording_popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+    
+        monkeypatch.setattr(agent_run_mod.subprocess, "Popen", recording_popen)
+    
+        from agentproc import run_lock as agentproc_run_lock
+    
+        def raising_write(*args, **kwargs):
+            raise RuntimeError("injected: lock write failed after Popen")
+    
+        monkeypatch.setattr(agentproc_run_lock, "write_run_lock", raising_write)
+        lock_key = _run_lock_key(os.path.abspath(str(tmp_path)), "t-lock-fail")
+        lock_file = lock_path_for(lock_key)
+    
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-lock-fail",
+            timeout_secs=60, run_key="t-lock-fail")
+        try:
+            with pytest.raises(RuntimeError, match="lock write failed"):
+                next(gen)
+            assert spawned, "Popen 应在写锁前成功"
+            proc = spawned[0]
+>           assert proc.poll() is not None, (
+                "写锁失败后已 spawn 的 agent 必须被终止并回收（否则是无锁孤儿）")
+E               AssertionError: 写锁失败后已 spawn 的 agent 必须被终止并回收（否则是无锁孤儿）
+E               assert None is not None
+E                +  where None = poll()
+E                +    where poll = <Popen: returncode: None args: ['/private/var/folders/t9/j35q71px7_v707gs5my...>.poll
+
+tests/test_agent_run_stream.py:384: AssertionError
+_____________ test_llm_provider_rejects_non_finite_confidence[nan] _____________
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x1183cd940>
+value = nan
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_llm_provider_rejects_non_finite_confidence(openai_stub, value):
+        """A2R8-08：NaN/inf 不得被夹成 1.0 或原样放行。"""
+        openai_stub.content = json.dumps({"choice": "spam", "confidence": value})
+        node = DecisionNode(id="t", choices=["spam", "ham"], input="x",
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match="confidence 非有限值"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:489: Failed
+_____________ test_llm_provider_rejects_non_finite_confidence[inf] _____________
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x118122d50>
+value = inf
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_llm_provider_rejects_non_finite_confidence(openai_stub, value):
+        """A2R8-08：NaN/inf 不得被夹成 1.0 或原样放行。"""
+        openai_stub.content = json.dumps({"choice": "spam", "confidence": value})
+        node = DecisionNode(id="t", choices=["spam", "ham"], input="x",
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match="confidence 非有限值"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:489: Failed
+____________ test_llm_provider_rejects_non_finite_confidence[-inf] _____________
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x118123890>
+value = -inf
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_llm_provider_rejects_non_finite_confidence(openai_stub, value):
+        """A2R8-08：NaN/inf 不得被夹成 1.0 或原样放行。"""
+        openai_stub.content = json.dumps({"choice": "spam", "confidence": value})
+        node = DecisionNode(id="t", choices=["spam", "ham"], input="x",
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match="confidence 非有限值"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:489: Failed
+___________ test_custom_provider_rejects_non_finite_confidence[nan] ____________
+
+value = nan
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_custom_provider_rejects_non_finite_confidence(value):
+        def provider(**request):
+            return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+    
+        register_decision_provider("non-finite-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                                provider="non-finite-conf")
+>           with pytest.raises(DecisionError, match="confidence 非有限值"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:502: Failed
+___________ test_custom_provider_rejects_non_finite_confidence[inf] ____________
+
+value = inf
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_custom_provider_rejects_non_finite_confidence(value):
+        def provider(**request):
+            return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+    
+        register_decision_provider("non-finite-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                                provider="non-finite-conf")
+>           with pytest.raises(DecisionError, match="confidence 非有限值"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:502: Failed
+___________ test_custom_provider_rejects_non_finite_confidence[-inf] ___________
+
+value = -inf
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_custom_provider_rejects_non_finite_confidence(value):
+        def provider(**request):
+            return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+    
+        register_decision_provider("non-finite-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                                provider="non-finite-conf")
+>           with pytest.raises(DecisionError, match="confidence 非有限值"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:502: Failed
+_________________ test_confidence_out_of_range_rejected[-0.01] _________________
+
+value = -0.01
+
+    @pytest.mark.parametrize("value", [-0.01, 1.01])
+    def test_confidence_out_of_range_rejected(value):
+        def provider(**request):
+            return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+    
+        register_decision_provider("out-of-range-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                                provider="out-of-range-conf")
+>           with pytest.raises(DecisionError, match="confidence 越界"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:517: Failed
+_________________ test_confidence_out_of_range_rejected[1.01] __________________
+
+value = 1.01
+
+    @pytest.mark.parametrize("value", [-0.01, 1.01])
+    def test_confidence_out_of_range_rejected(value):
+        def provider(**request):
+            return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+    
+        register_decision_provider("out-of-range-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                                provider="out-of-range-conf")
+>           with pytest.raises(DecisionError, match="confidence 越界"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:517: Failed
+________________________ test_confidence_bool_rejected _________________________
+
+    def test_confidence_bool_rejected():
+        """JSON true/false 不是置信度：float(True)=1.0 会让布尔值冒充最高置信。"""
+        def provider(**request):
+            return {"choice": "a", "confidence": True, "model": "stub", "raw": ""}
+    
+        register_decision_provider("bool-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                                provider="bool-conf")
+>           with pytest.raises(DecisionError, match="confidence 非数值"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:532: Failed
+___________________ test_batch_rejects_non_finite_confidence ___________________
+
+    def test_batch_rejects_non_finite_confidence():
+        def provider(**request):
+            return {"results": [
+                {"index": 0, "choice": "a", "confidence": float("nan")},
+                {"index": 1, "choice": "b", "confidence": 0.5},
+            ], "model": "stub", "raw": ""}
+    
+        register_decision_provider("batch-non-finite-conf", provider)
+        try:
+            node = DecisionNode(id="t", choices=["a", "b"], items=["x", "y"],
+                                provider="batch-non-finite-conf")
+>           with pytest.raises(DecisionError, match="第 0 项 confidence 非有限值"):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE <class 'plaita_nodes.decision.DecisionError'>
+
+tests/test_decision.py:549: Failed
+________________ test_validate_rejects_bad_min_confidence[nan] _________________
+
+value = nan
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.1])
+    def test_validate_rejects_bad_min_confidence(value):
+>       with pytest.raises(ValueError, match="min_confidence"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_decision.py:557: Failed
+________________ test_validate_rejects_bad_min_confidence[inf] _________________
+
+value = inf
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.1])
+    def test_validate_rejects_bad_min_confidence(value):
+>       with pytest.raises(ValueError, match="min_confidence"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_decision.py:557: Failed
+________________ test_validate_rejects_bad_min_confidence[-0.1] ________________
+
+value = -0.1
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.1])
+    def test_validate_rejects_bad_min_confidence(value):
+>       with pytest.raises(ValueError, match="min_confidence"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_decision.py:557: Failed
+________________ test_validate_rejects_bad_min_confidence[1.1] _________________
+
+value = 1.1
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.1])
+    def test_validate_rejects_bad_min_confidence(value):
+>       with pytest.raises(ValueError, match="min_confidence"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_decision.py:557: Failed
+____________________ test_atomic_write_keeps_target_private ____________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_atomic_write_keeps_target0')
+
+    def test_atomic_write_keeps_target_private(tmp_path):
+        """目标已存在且为 0644 时，原子替换后也必须收紧到 0600。"""
+        target = tmp_path / "sessions.json"
+        target.write_text("{}", encoding="utf-8")
+        os.chmod(target, 0o644)
+    
+        _write_sessions_atomic(target, {"exec": {"session_id": "s"}})
+    
+>       assert stat.S_IMODE(target.stat().st_mode) == 0o600
+E       AssertionError: assert 420 == 384
+E        +  where 420 = <built-in function S_IMODE>(33188)
+E        +    where <built-in function S_IMODE> = stat.S_IMODE
+E        +    and   33188 = os.stat_result(st_mode=33188, st_ino=1138996518, st_dev=16777233, st_nlink=1, st_uid=501, st_gid=20, st_size=41, st_atime=1792390735, st_mtime=1792390735, st_ctime=1792390735).st_mode
+E        +      where os.stat_result(st_mode=33188, st_ino=1138996518, st_dev=16777233, st_nlink=1, st_uid=501, st_gid=20, st_size=41, st_atime=1792390735, st_mtime=1792390735, st_ctime=1792390735) = stat()
+E        +        where stat = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_atomic_write_keeps_target0/sessions.json').stat
+
+tests/test_hitl_poller_tmp_hygiene.py:50: AssertionError
+_________________ test_atomic_write_sweeps_stale_tmp_siblings __________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_atomic_write_sweeps_stale0')
+
+    def test_atomic_write_sweeps_stale_tmp_siblings(tmp_path):
+        """写回前清扫同目录下本文件的过龄临时文件（SIGKILL 残留）。"""
+        target = tmp_path / "sessions.json"
+        target.write_text("{}", encoding="utf-8")
+        stale = tmp_path / f".{target.name}.dead.tmp"
+        stale.write_text('{"exec": {"session_id": "secret"}}', encoding="utf-8")
+        os.chmod(stale, 0o644)
+        _age(stale)
+    
+        _write_sessions_atomic(target, {"exec": {"session_id": "s"}})
+    
+>       assert not stale.exists(), "SIGKILL 残留的 sessions 临时文件应被清扫"
+E       AssertionError: SIGKILL 残留的 sessions 临时文件应被清扫
+E       assert not True
+E        +  where True = exists()
+E        +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_atomic_write_sweeps_stale0/.sessions.json.dead.tmp').exists
+
+tests/test_hitl_poller_tmp_hygiene.py:64: AssertionError
+____________________ test_terminal_session_sweeps_stale_tmp ____________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_terminal_session_sweeps_s0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1181f25d0>
+
+    def test_terminal_session_sweeps_stale_tmp(tmp_path, monkeypatch):
+        """session 结束路径也清扫残留（即使本轮没有触发写回）。"""
+        sessions = tmp_path / "sessions.json"
+        sessions.write_text(json.dumps({"exec": {"session_id": "s"}}), encoding="utf-8")
+        stale = tmp_path / f".{sessions.name}.crashed.tmp"
+        stale.write_text("{}", encoding="utf-8")
+        os.chmod(stale, 0o644)
+        _age(stale)
+    
+        def fake_get(url, timeout=None):
+            # 会话已在盘上被清掉：本轮没有可删除键，_drop_published_sessions
+            # 不会写回文件，只有 session 结束清扫能清掉残留。
+            sessions.unlink()
+            return _Resp({"has_reply": True, "replies": [{"content": "ok"}]})
+    
+        monkeypatch.setattr(hitl_poller.requests, "get", fake_get)
+        bus = _RecordingBus()
+    
+        events = poll_round(sessions, "http://hitl", bus)
+    
+        assert events[0]["data"]["status"] == "replied"
+        assert len(bus.publishes) == 1
+>       assert not stale.exists(), "session 结束时应清扫残留临时文件"
+E       AssertionError: session 结束时应清扫残留临时文件
+E       assert not True
+E        +  where True = exists()
+E        +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4137/test_terminal_session_sweeps_s0/.sessions.json.crashed.tmp').exists
+
+tests/test_hitl_poller_tmp_hygiene.py:101: AssertionError
+----------------------------- Captured stdout call -----------------------------
+  📨 exec → replied
+=============================== warnings summary ===============================
+tests/test_decision.py:239
+  /Users/kong/projects/infra4agent/plaita-nodes/tests/test_decision.py:239: SyntaxWarning: invalid escape sequence '\+'
+    with pytest.raises(DecisionError, match="jevlike \+ torch"):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_agent_run_stream.py::TestWatchdogThreadLifecycle::test_normal_completion_does_not_leak_watchdog_threads
+FAILED tests/test_agent_run_stream.py::TestLockWriteFailureCleanup::test_write_lock_failure_kills_spawned_agent
+FAILED tests/test_decision.py::test_llm_provider_rejects_non_finite_confidence[nan]
+FAILED tests/test_decision.py::test_llm_provider_rejects_non_finite_confidence[inf]
+FAILED tests/test_decision.py::test_llm_provider_rejects_non_finite_confidence[-inf]
+FAILED tests/test_decision.py::test_custom_provider_rejects_non_finite_confidence[nan]
+FAILED tests/test_decision.py::test_custom_provider_rejects_non_finite_confidence[inf]
+FAILED tests/test_decision.py::test_custom_provider_rejects_non_finite_confidence[-inf]
+FAILED tests/test_decision.py::test_confidence_out_of_range_rejected[-0.01]
+FAILED tests/test_decision.py::test_confidence_out_of_range_rejected[1.01] - ...
+FAILED tests/test_decision.py::test_confidence_bool_rejected - Failed: DID NO...
+FAILED tests/test_decision.py::test_batch_rejects_non_finite_confidence - Fai...
+FAILED tests/test_decision.py::test_validate_rejects_bad_min_confidence[nan]
+FAILED tests/test_decision.py::test_validate_rejects_bad_min_confidence[inf]
+FAILED tests/test_decision.py::test_validate_rejects_bad_min_confidence[-0.1]
+FAILED tests/test_decision.py::test_validate_rejects_bad_min_confidence[1.1]
+FAILED tests/test_hitl_poller_tmp_hygiene.py::test_atomic_write_keeps_target_private
+FAILED tests/test_hitl_poller_tmp_hygiene.py::test_atomic_write_sweeps_stale_tmp_siblings
+FAILED tests/test_hitl_poller_tmp_hygiene.py::test_terminal_session_sweeps_stale_tmp
+19 failed, 1 passed, 1 warning in 2.45s

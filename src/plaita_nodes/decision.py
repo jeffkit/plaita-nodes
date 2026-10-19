@@ -31,6 +31,7 @@ provider 注册表 ``DECISION_PROVIDERS``（仿 agentproc EXECUTORS，开放注�
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -89,6 +90,27 @@ def _render_payload(payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False)
     except TypeError:
         return str(payload)
+
+
+def _confidence(value: Any, *, label: str = "confidence") -> float:
+    """解析并校验置信度：必须是 0..1 的有限实数。
+
+    NaN/inf 不能静默夹取——``min(1.0, nan)`` 在 Python 中得 1.0，会让
+    ``confidence: NaN`` 冒充最高置信度；``float(True) == 1.0`` 同样不该
+    让布尔值冒充数值。非有限/越界一律具名拒绝，单条、批量与自定义
+    provider 共用同一口径（A2R8-08）。
+    """
+    if isinstance(value, bool):
+        raise DecisionError(f"{label} 非数值: {value!r}")
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError) as exc:
+        raise DecisionError(f"{label} 非数值: {value!r}") from exc
+    if not math.isfinite(confidence):
+        raise DecisionError(f"{label} 非有限值: {value!r}")
+    if not 0.0 <= confidence <= 1.0:
+        raise DecisionError(f"{label} 越界（需 0..1）: {value!r}")
+    return confidence
 
 
 def _indexed_batch(entries: Any, count: int) -> list[tuple[int, dict]]:
@@ -205,10 +227,7 @@ def _provider_llm(*, question: Any, choices: list[dict], input: Any, items: Opti
         choice = str(entry.get("choice", "")).strip()
         if choice not in space:
             raise DecisionError(f"LLM 返回的 choice {choice!r} 不在决策空间内: {sorted(space)}")
-        try:
-            return choice, max(0.0, min(1.0, float(entry.get("confidence", 0.0))))
-        except (TypeError, ValueError) as exc:
-            raise DecisionError(f"confidence 非数值: {entry.get('confidence')!r}") from exc
+        return choice, _confidence(entry.get("confidence", 0.0))
 
     if items is not None:
         results = []
@@ -265,9 +284,9 @@ def _provider_jev(*, question: Any, choices: list[dict], input: Any, items: Opti
         if not isinstance(answer, dict) or "choice" not in answer:
             raise DecisionError(f"systemone answers.{name} 缺少 choice: {str(data)[:200]}")
         try:
-            confidence = float(answer.get("confidence", 0.0))
-        except (TypeError, ValueError) as exc:
-            raise DecisionError(f"confidence 非数值: {answer.get('confidence')!r}") from exc
+            confidence = _confidence(answer.get("confidence", 0.0))
+        except DecisionError as exc:
+            raise DecisionError(f"systemone answers.{name} {exc}") from exc
         return {"choice": str(answer["choice"]), "confidence": confidence}
 
     if items is not None:
@@ -429,6 +448,11 @@ class DecisionNode(Node):
                              f"（已注册：{sorted(DECISION_PROVIDERS)}）")
         if self.on_low_confidence == "default" and self.default_choice is None:
             raise ValueError("on_low_confidence=default 需要同时配置 default_choice")
+        if self.min_confidence is not None:
+            try:
+                _confidence(self.min_confidence, label="min_confidence")
+            except DecisionError as exc:
+                raise ValueError(f"decision 节点配置非法: {exc}") from exc
 
     def execute(self, execution: Any) -> dict:
         choices = _normalize_choices(execution.evaluate(self.choices))
@@ -525,11 +549,8 @@ class DecisionNode(Node):
         choice = str(out.get("choice", ""))
         if choice not in {c["value"] for c in choices}:
             raise DecisionError(f"provider 返回的 {at}choice {choice!r} 不在决策空间内")
-        try:
-            return choice, float(out.get("confidence", 0.0))
-        except (TypeError, ValueError) as exc:
-            raise DecisionError(
-                f"provider 返回的 {at}confidence 非数值: {out.get('confidence')!r}") from exc
+        label = "confidence" if index is None else f"第 {index} 项 confidence"
+        return choice, _confidence(out.get("confidence", 0.0), label=label)
 
     def _default(self, execution: Any) -> str:
         default = execution.evaluate(self.default_choice)

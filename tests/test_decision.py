@@ -478,3 +478,81 @@ def test_llm_provider_bundle_endpoint(tmp_path, monkeypatch):
     finally:
         stub.server.shutdown()
         stub.server.server_close()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_llm_provider_rejects_non_finite_confidence(openai_stub, value):
+    """A2R8-08：NaN/inf 不得被夹成 1.0 或原样放行。"""
+    openai_stub.content = json.dumps({"choice": "spam", "confidence": value})
+    node = DecisionNode(id="t", choices=["spam", "ham"], input="x",
+                        api_base=openai_stub.base, api_key="k", model="m")
+    with pytest.raises(DecisionError, match="confidence 非有限值"):
+        node.execute(FakeExecution())
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_custom_provider_rejects_non_finite_confidence(value):
+    def provider(**request):
+        return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+
+    register_decision_provider("non-finite-conf", provider)
+    try:
+        node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                            provider="non-finite-conf")
+        with pytest.raises(DecisionError, match="confidence 非有限值"):
+            node.execute(FakeExecution())
+    finally:
+        DECISION_PROVIDERS.pop("non-finite-conf", None)
+
+
+@pytest.mark.parametrize("value", [-0.01, 1.01])
+def test_confidence_out_of_range_rejected(value):
+    def provider(**request):
+        return {"choice": "a", "confidence": value, "model": "stub", "raw": ""}
+
+    register_decision_provider("out-of-range-conf", provider)
+    try:
+        node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                            provider="out-of-range-conf")
+        with pytest.raises(DecisionError, match="confidence 越界"):
+            node.execute(FakeExecution())
+    finally:
+        DECISION_PROVIDERS.pop("out-of-range-conf", None)
+
+
+def test_confidence_bool_rejected():
+    """JSON true/false 不是置信度：float(True)=1.0 会让布尔值冒充最高置信。"""
+    def provider(**request):
+        return {"choice": "a", "confidence": True, "model": "stub", "raw": ""}
+
+    register_decision_provider("bool-conf", provider)
+    try:
+        node = DecisionNode(id="t", choices=["a", "b"], input="x",
+                            provider="bool-conf")
+        with pytest.raises(DecisionError, match="confidence 非数值"):
+            node.execute(FakeExecution())
+    finally:
+        DECISION_PROVIDERS.pop("bool-conf", None)
+
+
+def test_batch_rejects_non_finite_confidence():
+    def provider(**request):
+        return {"results": [
+            {"index": 0, "choice": "a", "confidence": float("nan")},
+            {"index": 1, "choice": "b", "confidence": 0.5},
+        ], "model": "stub", "raw": ""}
+
+    register_decision_provider("batch-non-finite-conf", provider)
+    try:
+        node = DecisionNode(id="t", choices=["a", "b"], items=["x", "y"],
+                            provider="batch-non-finite-conf")
+        with pytest.raises(DecisionError, match="第 0 项 confidence 非有限值"):
+            node.execute(FakeExecution())
+    finally:
+        DECISION_PROVIDERS.pop("batch-non-finite-conf", None)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, 1.1])
+def test_validate_rejects_bad_min_confidence(value):
+    with pytest.raises(ValueError, match="min_confidence"):
+        DecisionNode(id="t", choices=["a"], min_confidence=value).validate()
