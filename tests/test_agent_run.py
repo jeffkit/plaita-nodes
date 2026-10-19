@@ -77,7 +77,7 @@ class TestAgentRunNode:
         from agentproc import EXECUTORS
 
         def _make():
-            def build_args(message, session_id, env):
+            def build_args(message, session_id, env, _ctx=None):
                 return ["true"]  # /usr/bin/true，无输出
             return {"build_args": build_args}
 

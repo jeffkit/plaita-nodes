@@ -104,13 +104,16 @@ def test_crash_during_hitl_wait_recovers(tmp_path, hitl_stub):
     persist(r2["context"])
 
     # —— 此处模拟进程崩溃重启：新 FlowExecution + 从盘恢复 context ——
-    # poller（外部进程）从 hitl-server 轮询到回复 → 向 bus 发布 hitl_reply
+    # poller（外部进程）从 hitl-server 轮询到回复 → 向 bus 发布 hitl_reply。
+    # resume 载荷按生产形态带 subscription_id（plaita#221 起 event_filter 代投
+    # 的 event/timeout 消息必带；缺失会被判陈旧决议并拒绝恢复）。
     crash_note = {"session_id": "sess-42"}
 
     r3 = FlowExecution.run(flow, mode=ExecutionMode.DISTRIBUTED, event_bus=bus,
                            context=load(), resume_type="event",
                            resume_data={"status": "replied", "replies": ["同意"],
-                                        "session_id": crash_note["session_id"]})
+                                        "session_id": crash_note["session_id"],
+                                        "subscription_id": "sub-hitl-1"})
     assert r3["id"] == "confirm" and not r3.get("is_suspend")
     persist(r3["context"])
 

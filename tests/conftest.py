@@ -74,7 +74,9 @@ def register_test_echo_executor():
     from agentproc import EXECUTORS
 
     def _make():
-        def build_args(message, session_id, env):
+        # agentproc 恒以 4 个位置参数调用 build_args（第 4 参 = permission ctx，
+        # efc95e7 引入）；桩必须显式接收，否则整个 executor 直接不可用。
+        def build_args(message, session_id, env, _ctx=None):
             return ["echo", f"env={env.get('ECHO_MARKER', '')} msg={message}"]
         return {"build_args": build_args}
 

@@ -25,6 +25,13 @@ def _spawn_session_leader(secs=60):
     return subprocess.Popen(["sleep", str(secs)], start_new_session=True)
 
 
+# agentproc 0.19+（8b3bb7d）的遗言锁记录 spawner(worker) pid，cleanup 只在
+# spawner 已死时才当孤儿清理。测试进程自身必须存活（还要断言），因此注入一个
+# 不可能存在的 pid 来模拟「worker 已死、agent 成孤儿」——write_run_lock 文档
+# 明确支持显式传值注入已死 spawner。
+_DEAD_SPAWNER_PID = 2**31 - 1
+
+
 class TestPreflightWorkspace:
     def test_clean_passes(self, tmp_path):
         info = preflight_workspace(str(tmp_path / "fresh-ws"))
@@ -34,7 +41,8 @@ class TestPreflightWorkspace:
         ws = str(tmp_path / "ws")
         proc = _spawn_session_leader()
         try:
-            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"])
+            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"],
+                                    spawner=_DEAD_SPAWNER_PID)
             info = preflight_workspace(ws)
             assert info["action"] == "killed"
             assert proc.poll() is not None
@@ -45,7 +53,8 @@ class TestPreflightWorkspace:
         ws = str(tmp_path / "ws")
         proc = _spawn_session_leader()
         try:
-            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"])
+            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"],
+                                    spawner=_DEAD_SPAWNER_PID)
             monkeypatch.setattr(run_lock, "_ps_fields", lambda pid: None)
             with pytest.raises(AgentRunError, match="拒绝开工"):
                 preflight_workspace(ws)
@@ -60,7 +69,7 @@ class TestAgentRunNodePreflight:
         from agentproc import EXECUTORS
 
         def _make():
-            def build_args(message, session_id, env):
+            def build_args(message, session_id, env, _ctx=None):
                 return ["sh", "-c", f"echo msg={message}"]
             return {"build_args": build_args}
 
@@ -73,7 +82,8 @@ class TestAgentRunNodePreflight:
         ws = str(agent_config_repo)
         proc = _spawn_session_leader()
         try:
-            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"])
+            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"],
+                                    spawner=_DEAD_SPAWNER_PID)
             monkeypatch.setattr(run_lock, "_ps_fields", lambda pid: None)
             node = AgentRunNode(id="t", agent="echo", prompt="hi", repo=ws)
             with pytest.raises(AgentRunError):
@@ -88,7 +98,8 @@ class TestAgentRunNodePreflight:
         ws = str(agent_config_repo)
         proc = _spawn_session_leader()
         try:
-            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"])
+            run_lock.write_run_lock(ws, proc.pid, ["sleep", "60"],
+                                    spawner=_DEAD_SPAWNER_PID)
             node = AgentRunNode(id="t", agent="echo", prompt="hello", repo=ws)
             out = node.execute(_EXEC())
             assert "msg=hello" in out["text"]

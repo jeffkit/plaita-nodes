@@ -47,6 +47,12 @@ def _spawn_session_leader(secs=60):
     return subprocess.Popen(["sleep", str(secs)], start_new_session=True)
 
 
+# agentproc 0.19+（8b3bb7d）只在记录的 spawner(worker) 已死时才清理遗言锁。
+# 模拟「run 的 worker 已死、agent 成孤儿」需注入一个不可能存在的 pid
+# （write_run_lock 文档明确支持该测试注入点），不能用默认的当前测试进程。
+_DEAD_SPAWNER_PID = 2**31 - 1
+
+
 def _run_lock_key(monkeypatch, node, execution) -> str:
     """截获本次 run 实际用的遗言锁键——不对键格式做假设（看行为，不看实现形状）。"""
     import agentproc.runner as ap_runner
@@ -98,7 +104,8 @@ class TestConcurrentRunsSameWorkspace:
 
         proc_b = _spawn_session_leader()
         try:
-            run_lock.write_run_lock(key_b, proc_b.pid, ["sleep", "60"])
+            run_lock.write_run_lock(key_b, proc_b.pid, ["sleep", "60"],
+                                    spawner=_DEAD_SPAWNER_PID)
 
             with caplog.at_level(logging.WARNING, logger="plaita_nodes.agent_run"):
                 out = node.execute(_Run("run-b"))
