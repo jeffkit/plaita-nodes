@@ -319,6 +319,74 @@ def test_email_send_via_smtp(monkeypatch, tmp_path):
     assert sent["msg"]["Subject"] == "告警"
 
 
+def test_email_html_plain_fallback_strips_tags():
+    """#12：body_is_html 时 text/plain 备选件是可读文本，不是原始 HTML。"""
+    from plaita_nodes.notify_backends import _build_email_message
+
+    html = ("<html><head><title>标题</title></head><body>"
+            "<h1>磁盘告警</h1><p>使用率 <b>90%</b> &amp; 持续上升<br>请处理</p>"
+            "<script>alert(1)</script></body></html>")
+    msg = _build_email_message({"username": "bot@test"}, ["a@x.com"], "告警", html, True)
+    assert msg.get_content_type() == "multipart/alternative"
+
+    plain = msg.get_body(preferencelist=("plain",)).get_content()
+    assert "<" not in plain and ">" not in plain
+    assert "磁盘告警" in plain
+    assert "使用率 90% & 持续上升" in plain
+    assert "请处理" in plain
+    assert "alert" not in plain and "标题" not in plain
+
+    html_part = msg.get_body(preferencelist=("html",)).get_content()
+    assert html_part.strip() == html.strip()
+
+
+def test_email_plain_body_has_no_html_part():
+    from plaita_nodes.notify_backends import _build_email_message
+
+    msg = _build_email_message({"username": "bot@test"}, ["a@x.com"], "告警",
+                               "磁盘 90%", False)
+    assert msg.get_content_type() == "text/plain"
+    assert msg.get_content().strip() == "磁盘 90%"
+    assert msg.get_body(preferencelist=("html",)) is None
+
+
+def test_email_html_only_markup_gets_readable_placeholder():
+    from plaita_nodes.notify_backends import _build_email_message
+
+    msg = _build_email_message({"username": "bot@test"}, ["a@x.com"], "告警",
+                               "<img src='https://x/y.png'>", True)
+    plain = msg.get_body(preferencelist=("plain",)).get_content()
+    assert "<" not in plain and plain.strip()
+
+
+def test_email_send_html_body_mime_parts(monkeypatch, tmp_path):
+    """节点到 backend 的完整链路：HTML 主件 + 去标签纯文本备件。"""
+    _cred_env(monkeypatch, tmp_path, "smtp", {
+        "host": "smtp.test", "port": 587, "username": "bot@test", "password": "pw",
+    })
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def login(self, u, p):
+            pass
+
+        def send_message(self, msg):
+            sent["msg"] = msg
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+    _run_node("email_send", credential="smtp", to="a@x.com", subject="日报",
+              body="<p>完成 <b>3</b> 项</p>", body_is_html=True)
+    msg = sent["msg"]
+    assert msg.get_body(preferencelist=("plain",)).get_content().strip() == "完成 3 项"
+    assert msg.get_body(preferencelist=("html",)).get_content().strip() == "<p>完成 <b>3</b> 项</p>"
+
+
 # ---- dry-run 契约（AGENTS.md：有副作用的节点一律尊重 globalContext.dry_run）----
 
 _DRY_RUN_NODE_TYPES = [

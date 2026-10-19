@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import smtplib
 from email.message import EmailMessage
+from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List
 
 import requests
@@ -206,6 +207,72 @@ def _backend_dingtalk_webhook(execution: Any, node: Any, text: str) -> dict:
                       channel="dingtalk_webhook")
 
 
+class _HtmlToText(HTMLParser):
+    """把 HTML 正文降级成 text/plain 备选件（#12）。
+
+    块级标签换行、跳过 script/style/head；实体由 HTMLParser 解码；最后按行
+    折叠空白——不支持 HTML 的客户端/网关看到的是可读文本，而不是标签源码。
+    """
+
+    _BLOCK_TAGS = frozenset({
+        "p", "div", "br", "li", "tr", "td", "th", "h1", "h2", "h3", "h4",
+        "h5", "h6", "blockquote", "pre", "table", "ul", "ol", "hr",
+    })
+    _SKIP_TAGS = frozenset({"script", "style", "head", "title"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def as_text(self) -> str:
+        raw = "".join(self._parts)
+        lines = [" ".join(line.split()) for line in raw.splitlines()]
+        return "\n".join(line for line in lines if line)
+
+
+def _html_to_text(html: str) -> str:
+    parser = _HtmlToText()
+    parser.feed(html)
+    parser.close()
+    return parser.as_text()
+
+
+def _build_email_message(cred: Dict[str, Any], recipients: List[str],
+                         subject: str, text: str, body_is_html: bool) -> EmailMessage:
+    msg = EmailMessage()
+    msg["From"] = cred.get("username") or "plaita"
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
+    if body_is_html:
+        # multipart/alternative：纯文本在前作降级备选，HTML 在后为主件。
+        # 备选件必须是去标签后的可读文本，不能塞原始 HTML（#12）。
+        plain = _html_to_text(text) or "（正文为 HTML，当前客户端不支持显示）"
+        msg.set_content(plain)
+        msg.add_alternative(text, subtype="html")
+    else:
+        msg.set_content(text)
+    return msg
+
+
 def _backend_email_send(execution: Any, node: Any, text: str) -> dict:
     """SMTP 发送。text = 已 evaluate 的正文；to/subject/body_is_html 读节点字段。"""
     cred = _credential_data(node)
@@ -220,13 +287,7 @@ def _backend_email_send(execution: Any, node: Any, text: str) -> dict:
     subject = str(execution.evaluate(getattr(node, "subject", None)) or "")
     body_is_html = bool(getattr(node, "body_is_html", False))
 
-    msg = EmailMessage()
-    msg["From"] = cred.get("username") or "plaita"
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject
-    msg.set_content(text)
-    if body_is_html:
-        msg.add_alternative(text, subtype="html")
+    msg = _build_email_message(cred, recipients, subject, text, body_is_html)
 
     if cred.get("use_ssl"):
         smtp: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=20)
