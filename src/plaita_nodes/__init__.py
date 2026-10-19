@@ -28,6 +28,24 @@ from .rate_limit import RateLimitNode
 from .report import ReportNode, append_entry, read_entries
 from .notify import NotifyNode
 from .notify_backends import NOTIFY_BACKENDS, get_notify_backend, register_notify_backend
+from .sandbox import (
+    SANDBOX_DRIVERS,
+    Redactor,
+    SandboxConfigError,
+    SandboxError,
+    SandboxLeaseError,
+    SandboxPinError,
+    WorkspaceHandle,
+    WorkspaceLease,
+    WorkspaceSpec,
+    get_driver,
+    load_sandboxes,
+    register_driver,
+    register_sandbox_executor,
+)
+from .sandbox_docker import DockerDriver
+from .sandbox_krunvm import KrunvmDriver
+from .sandbox_ssh import SshDriver
 from .webhooks import DingtalkWebhookNode, FeishuWebhookNode, SlackWebhookNode, WecomWebhookNode
 from .write_file import WriteFileNode
 
@@ -62,5 +80,9 @@ __all__ = [
     "register_all",
     "load_merged_config", "resolve_agent", "resolve_provider", "interpolate",
     "AgentConfigError", "EXECUTOR_ALIASES",
+    "SANDBOX_DRIVERS", "register_driver", "get_driver", "load_sandboxes",
+    "register_sandbox_executor", "DockerDriver", "KrunvmDriver", "SshDriver",
+    "WorkspaceSpec", "WorkspaceHandle", "WorkspaceLease", "Redactor",
+    "SandboxError", "SandboxConfigError", "SandboxPinError", "SandboxLeaseError",
     "__version__",
 ]
