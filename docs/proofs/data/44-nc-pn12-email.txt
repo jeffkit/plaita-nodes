@@ -1,0 +1,66 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+__________________ test_email_html_plain_fallback_strips_tags __________________
+
+    def test_email_html_plain_fallback_strips_tags():
+        """#12：body_is_html 时 text/plain 备选件是可读文本，不是原始 HTML。"""
+>       from plaita_nodes.notify_backends import _build_email_message
+E       ImportError: cannot import name '_build_email_message' from 'plaita_nodes.notify_backends' (/Users/kong/projects/infra4agent/plaita-nodes/src/plaita_nodes/notify_backends.py)
+
+tests/test_connectors.py:324: ImportError
+____________________ test_email_plain_body_has_no_html_part ____________________
+
+    def test_email_plain_body_has_no_html_part():
+>       from plaita_nodes.notify_backends import _build_email_message
+E       ImportError: cannot import name '_build_email_message' from 'plaita_nodes.notify_backends' (/Users/kong/projects/infra4agent/plaita-nodes/src/plaita_nodes/notify_backends.py)
+
+tests/test_connectors.py:344: ImportError
+____________ test_email_html_only_markup_gets_readable_placeholder _____________
+
+    def test_email_html_only_markup_gets_readable_placeholder():
+>       from plaita_nodes.notify_backends import _build_email_message
+E       ImportError: cannot import name '_build_email_message' from 'plaita_nodes.notify_backends' (/Users/kong/projects/infra4agent/plaita-nodes/src/plaita_nodes/notify_backends.py)
+
+tests/test_connectors.py:354: ImportError
+_____________________ test_email_send_html_body_mime_parts _____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1053469c0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4079/test_email_send_html_body_mime0')
+
+    def test_email_send_html_body_mime_parts(monkeypatch, tmp_path):
+        """节点到 backend 的完整链路：HTML 主件 + 去标签纯文本备件。"""
+        _cred_env(monkeypatch, tmp_path, "smtp", {
+            "host": "smtp.test", "port": 587, "username": "bot@test", "password": "pw",
+        })
+        sent = {}
+    
+        class FakeSMTP:
+            def __init__(self, host, port, timeout=None):
+                pass
+    
+            def login(self, u, p):
+                pass
+    
+            def send_message(self, msg):
+                sent["msg"] = msg
+    
+            def quit(self):
+                pass
+    
+        monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+        _run_node("email_send", credential="smtp", to="a@x.com", subject="日报",
+                  body="<p>完成 <b>3</b> 项</p>", body_is_html=True)
+        msg = sent["msg"]
+>       assert msg.get_body(preferencelist=("plain",)).get_content().strip() == "完成 3 项"
+E       AssertionError: assert '<p>完成 <b>3</b> 项</p>' == '完成 3 项'
+E         
+E         - 完成 3 项
+E         + <p>完成 <b>3</b> 项</p>
+
+tests/test_connectors.py:386: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_connectors.py::test_email_html_plain_fallback_strips_tags
+FAILED tests/test_connectors.py::test_email_plain_body_has_no_html_part - Imp...
+FAILED tests/test_connectors.py::test_email_html_only_markup_gets_readable_placeholder
+FAILED tests/test_connectors.py::test_email_send_html_body_mime_parts - Asser...
+4 failed, 27 deselected in 0.35s

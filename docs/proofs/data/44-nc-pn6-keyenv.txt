@@ -1,0 +1,68 @@
+F..FFF                                                                   [100%]
+=================================== FAILURES ===================================
+_______________ test_resolve_provider_key_env_reads_host_environ _______________
+
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4077/test_resolve_provider_key_env_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x104026060>
+
+    def test_resolve_provider_key_env_reads_host_environ(agent_config_repo: Path, monkeypatch):
+        """environ=None（生产默认）→ keyEnv 读宿主 os.environ，不再恒为空串。"""
+        _write_keyenv_provider(agent_config_repo)
+        monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-keyenv")
+        providers = load_merged_config("providers", repo=str(agent_config_repo))
+>       assert resolve_provider("glm-52", providers)["apiKey"] == "sk-keyenv"
+E       AssertionError: assert '' == 'sk-keyenv'
+E         
+E         - sk-keyenv
+
+tests/test_config.py:99: AssertionError
+_______________ test_resolve_provider_key_env_missing_fails_fast _______________
+
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4077/test_resolve_provider_key_env_2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x104173f00>
+
+    def test_resolve_provider_key_env_missing_fails_fast(agent_config_repo: Path, monkeypatch):
+        _write_keyenv_provider(agent_config_repo)
+        monkeypatch.delenv("TEST_PROVIDER_KEY", raising=False)
+        providers = load_merged_config("providers", repo=str(agent_config_repo))
+>       with pytest.raises(AgentConfigError, match="TEST_PROVIDER_KEY.*未设置"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE AgentConfigError
+
+tests/test_config.py:122: Failed
+________________ test_resolve_provider_key_env_empty_fails_fast ________________
+
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4077/test_resolve_provider_key_env_3')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1041739b0>
+
+    def test_resolve_provider_key_env_empty_fails_fast(agent_config_repo: Path, monkeypatch):
+        _write_keyenv_provider(agent_config_repo)
+        monkeypatch.setenv("TEST_PROVIDER_KEY", "")
+        providers = load_merged_config("providers", repo=str(agent_config_repo))
+>       with pytest.raises(AgentConfigError, match="TEST_PROVIDER_KEY.*为空"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE AgentConfigError
+
+tests/test_config.py:130: Failed
+____________ test_resolve_agent_key_env_translates_to_recursive_env ____________
+
+agent_config_repo = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4077/test_resolve_agent_key_env_tra0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10409e550>
+
+    def test_resolve_agent_key_env_translates_to_recursive_env(agent_config_repo: Path, monkeypatch):
+        """生产路径：agents.json → provider.keyEnv → RECURSIVE_API_KEY。"""
+        _write_keyenv_provider(agent_config_repo)
+        monkeypatch.setenv("TEST_PROVIDER_KEY", "sk-keyenv")
+        profile = resolve_agent("glm-52", repo=str(agent_config_repo))
+>       assert profile["env"]["RECURSIVE_API_KEY"] == "sk-keyenv"
+E       AssertionError: assert '' == 'sk-keyenv'
+E         
+E         - sk-keyenv
+
+tests/test_config.py:139: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_config.py::test_resolve_provider_key_env_reads_host_environ
+FAILED tests/test_config.py::test_resolve_provider_key_env_missing_fails_fast
+FAILED tests/test_config.py::test_resolve_provider_key_env_empty_fails_fast
+FAILED tests/test_config.py::test_resolve_agent_key_env_translates_to_recursive_env
+4 failed, 2 passed, 8 deselected in 0.32s

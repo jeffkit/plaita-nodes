@@ -1,0 +1,31 @@
+=== A. 当前 main 是否包含 AGS 沙箱实现 ===
+$ git ls-tree -r --name-only origin/main | grep -i sandbox
+(空：main 无 sandbox_* 文件，AGS 线未并入生产)
+
+$ git grep -n sync_in origin/main
+(空：main 无 sync_in 代码)
+
+=== B. feat/ags-driver 状态（未合并、已 rebase 到 main、含 30957fd/204c608）===
+$ git merge-base origin/main origin/feat/ags-driver
+48d087e fix(agent_run)!: agentproc 路径缺 cwd——agent 在【错误目录】干活，改动被静默丢弃
+$ git log --oneline origin/main..origin/feat/ags-driver | wc -l
+      32
+$ git log --oneline --grep sync_in origin/feat/ags-driver
+1b9cbd0 feat(sandbox): 阶段 1+2——沙箱唯一写者：sync_in fail-closed 校验，sync_out 只回写已校验增量
+7b115e8 fix(sandbox): 阶段 0 止血——sync_out 沙箱侧也排除 harness 记忆书签
+cbbce1c fix(sandbox): _host_dirty_patch 临时索引先 read-tree HEAD——修复排除已跟踪书签被误报为删除
+d1b4d44 fix(sandbox): sync_in 排除 harness 记忆书签 facts.jsonl——避免宿主/沙箱双向改写冲突
+f98f120 fix(sandbox): sync_in 破坏性语义——reset --hard 抹掉沙箱 agent 成果
+
+=== C. 分支侧 sync_in 语义 = fail-closed（非自愈），测试通过 ===
+$ cd /tmp/pn-ags-driver && pytest tests/test_sandbox_ags.py -k sync_in
+..                                                                       [100%]
+2 passed, 33 deselected in 0.92s
+
+=== D. 控制面有界性测试（plaita origin/main 已合并 170daa0）===
+$ git merge-base --is-ancestor 170daa0 origin/main
+YES
+170daa0 2026-10-13 15:18:51 +0800 test(worker): 钉住 sync_in 漂移失败的有界性（plaita-nodes#15 条件 2）
+$ pytest tests/unit/test_issue73_deterministic_bounded.py -k SyncInDrift
+....                                                                     [100%]
+4 passed, 11 deselected in 1.08s

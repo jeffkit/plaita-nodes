@@ -1,0 +1,15 @@
+=== plaita origin/main (37434a0) #88 fixed parser: three shapes + named errors ===
+rediss://redis.internal:6380/0 => RedisTarget(host='redis.internal', port=6380, db=0, password=None, username=None, scheme='rediss', unix_socket_path=None, query_options=None)
+redis://user:pass@host:6379/0 => RedisTarget(host='host', port=6379, db=0, password='pass', username='user', scheme='redis', unix_socket_path=None, query_options=None)
+redis://host => RedisTarget(host='host', port=6379, db=0, password=None, username=None, scheme='redis', unix_socket_path=None, query_options=None)
+redis://:pw@host:6379/2 => RedisTarget(host='host', port=6379, db=2, password='pw', username=None, scheme='redis', unix_socket_path=None, query_options=None)
+rediss://[2001:db8::1]:6380/2 => RedisTarget(host='2001:db8::1', port=6380, db=2, password=None, username=None, scheme='rediss', unix_socket_path=None, query_options=None)
+http://host => RedisUrlError: 不支持的 Redis URL: 'http://host'；只支持 redis:// / rediss:// / unix://（scheme 必须小写，缺 scheme 或 http:// 之类都不是 Redis URL）
+redis://host:notaport/0 => RedisUrlError: Redis URL 非法（Port could not be cast to integer value as '***'）: 'redis://host:***'
+redis:// => RedisUrlError: Redis URL 缺少主机名: 'redis://'
+
+=== pytest plaita tests/unit/test_redis_url_parse.py (origin/main) ===
+    @pytest.mark.timeout(1200)  # 4600 语料 × 掩码全链在 CI 2 核上 >150s 默认门（本机 3.13.3 实测 13m12s）
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+6 passed, 95 deselected, 2 warnings, 38 subtests passed in 0.15s

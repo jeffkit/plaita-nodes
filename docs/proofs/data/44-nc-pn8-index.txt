@@ -1,0 +1,210 @@
+FFFFFFF                                                                  [100%]
+=================================== FAILURES ===================================
+_________ test_llm_provider_batch_uses_model_index_not_array_position __________
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x1048f0ad0>
+
+    def test_llm_provider_batch_uses_model_index_not_array_position(openai_stub):
+        """#8：模型乱序返回时按 index 贴标签，不能按数组位置张冠李戴。"""
+        openai_stub.content = json.dumps({"results": [
+            {"index": 2, "choice": "ham", "confidence": 0.90},
+            {"index": 0, "choice": "spam", "confidence": 0.97},
+            {"index": 1, "choice": "ham", "confidence": 0.30},
+        ]})
+        node = DecisionNode(id="t", choices=["spam", "ham"],
+                            items=["a", "b", "c"], min_confidence=0.8,
+                            api_base=openai_stub.base, api_key="k", model="m")
+        out = node.execute(FakeExecution())
+>       assert [(r["index"], r["choice"], r["confidence"]) for r in out["results"]] == [
+            (0, "spam", 0.97),
+            (1, "ham", 0.30),
+            (2, "ham", 0.90),
+        ]
+E       AssertionError: assert [(0, 'ham', 0..., 'ham', 0.3)] == [(0, 'spam', ..., 'ham', 0.9)]
+E         
+E         At index 0 diff: (0, 'ham', 0.9) != (0, 'spam', 0.97)
+E         Use -v to get more diff
+
+tests/test_decision.py:321: AssertionError
+_______ test_llm_provider_batch_rejects_bad_index[0-index \u91cd\u590d] ________
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x1048c5a90>
+index = 0, match = 'index 重复'
+
+    @pytest.mark.parametrize(
+        "index, match",
+        [
+            (0, "index 重复"),          # 两条 index=0，len 相同但 1 缺失
+            (7, "index 越界"),
+            ("1", "index 非整数"),
+            (True, "index 非整数"),
+            (None, "缺少 index"),
+        ],
+    )
+    def test_llm_provider_batch_rejects_bad_index(openai_stub, index, match):
+        second = {"choice": "ham", "confidence": 0.5}
+        if index is not None:
+            second["index"] = index
+        openai_stub.content = json.dumps({"results": [
+            {"index": 0, "choice": "spam", "confidence": 0.9},
+            second,
+        ]})
+        node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match=match):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE DecisionError
+
+tests/test_decision.py:349: Failed
+_______ test_llm_provider_batch_rejects_bad_index[7-index \u8d8a\u754c] ________
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x107180f50>
+index = 7, match = 'index 越界'
+
+    @pytest.mark.parametrize(
+        "index, match",
+        [
+            (0, "index 重复"),          # 两条 index=0，len 相同但 1 缺失
+            (7, "index 越界"),
+            ("1", "index 非整数"),
+            (True, "index 非整数"),
+            (None, "缺少 index"),
+        ],
+    )
+    def test_llm_provider_batch_rejects_bad_index(openai_stub, index, match):
+        second = {"choice": "ham", "confidence": 0.5}
+        if index is not None:
+            second["index"] = index
+        openai_stub.content = json.dumps({"results": [
+            {"index": 0, "choice": "spam", "confidence": 0.9},
+            second,
+        ]})
+        node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match=match):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE DecisionError
+
+tests/test_decision.py:349: Failed
+____ test_llm_provider_batch_rejects_bad_index[1-index \u975e\u6574\u6570] _____
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x106dcefd0>
+index = '1', match = 'index 非整数'
+
+    @pytest.mark.parametrize(
+        "index, match",
+        [
+            (0, "index 重复"),          # 两条 index=0，len 相同但 1 缺失
+            (7, "index 越界"),
+            ("1", "index 非整数"),
+            (True, "index 非整数"),
+            (None, "缺少 index"),
+        ],
+    )
+    def test_llm_provider_batch_rejects_bad_index(openai_stub, index, match):
+        second = {"choice": "ham", "confidence": 0.5}
+        if index is not None:
+            second["index"] = index
+        openai_stub.content = json.dumps({"results": [
+            {"index": 0, "choice": "spam", "confidence": 0.9},
+            second,
+        ]})
+        node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match=match):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE DecisionError
+
+tests/test_decision.py:349: Failed
+___ test_llm_provider_batch_rejects_bad_index[True-index \u975e\u6574\u6570] ___
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x106dcf820>
+index = True, match = 'index 非整数'
+
+    @pytest.mark.parametrize(
+        "index, match",
+        [
+            (0, "index 重复"),          # 两条 index=0，len 相同但 1 缺失
+            (7, "index 越界"),
+            ("1", "index 非整数"),
+            (True, "index 非整数"),
+            (None, "缺少 index"),
+        ],
+    )
+    def test_llm_provider_batch_rejects_bad_index(openai_stub, index, match):
+        second = {"choice": "ham", "confidence": 0.5}
+        if index is not None:
+            second["index"] = index
+        openai_stub.content = json.dumps({"results": [
+            {"index": 0, "choice": "spam", "confidence": 0.9},
+            second,
+        ]})
+        node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match=match):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE DecisionError
+
+tests/test_decision.py:349: Failed
+______ test_llm_provider_batch_rejects_bad_index[None-\u7f3a\u5c11 index] ______
+
+openai_stub = <test_decision.StubOpenAIDecision object at 0x1071ed910>
+index = None, match = '缺少 index'
+
+    @pytest.mark.parametrize(
+        "index, match",
+        [
+            (0, "index 重复"),          # 两条 index=0，len 相同但 1 缺失
+            (7, "index 越界"),
+            ("1", "index 非整数"),
+            (True, "index 非整数"),
+            (None, "缺少 index"),
+        ],
+    )
+    def test_llm_provider_batch_rejects_bad_index(openai_stub, index, match):
+        second = {"choice": "ham", "confidence": 0.5}
+        if index is not None:
+            second["index"] = index
+        openai_stub.content = json.dumps({"results": [
+            {"index": 0, "choice": "spam", "confidence": 0.9},
+            second,
+        ]})
+        node = DecisionNode(id="t", choices=["spam", "ham"], items=["a", "b"],
+                            api_base=openai_stub.base, api_key="k", model="m")
+>       with pytest.raises(DecisionError, match=match):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE DecisionError
+
+tests/test_decision.py:349: Failed
+_____________ test_custom_provider_batch_index_mapping_and_bounds ______________
+
+    def test_custom_provider_batch_index_mapping_and_bounds():
+        """自定义 provider 的乱序结果同样按 index 归位；越界也具名拒绝。"""
+        def provider(**request):
+            return {"results": [
+                {"index": 1, "choice": "ham", "confidence": 0.9},
+                {"index": 0, "choice": "spam", "confidence": 0.8},
+            ], "model": "custom", "raw": "{}"}
+    
+        register_decision_provider("test-shuffle", provider)
+        try:
+            node = DecisionNode(id="t", provider="test-shuffle",
+                                choices=["spam", "ham"], items=["a", "b"])
+            out = node.execute(FakeExecution())
+>           assert [(r["index"], r["choice"]) for r in out["results"]] == [
+                (0, "spam"), (1, "ham")]
+E               AssertionError: assert [(0, 'ham'), (1, 'spam')] == [(0, 'spam'), (1, 'ham')]
+E                 
+E                 At index 0 diff: (0, 'ham') != (0, 'spam')
+E                 Use -v to get more diff
+
+tests/test_decision.py:366: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_decision.py::test_llm_provider_batch_uses_model_index_not_array_position
+FAILED tests/test_decision.py::test_llm_provider_batch_rejects_bad_index[0-index \u91cd\u590d]
+FAILED tests/test_decision.py::test_llm_provider_batch_rejects_bad_index[7-index \u8d8a\u754c]
+FAILED tests/test_decision.py::test_llm_provider_batch_rejects_bad_index[1-index \u975e\u6574\u6570]
+FAILED tests/test_decision.py::test_llm_provider_batch_rejects_bad_index[True-index \u975e\u6574\u6570]
+FAILED tests/test_decision.py::test_llm_provider_batch_rejects_bad_index[None-\u7f3a\u5c11 index]
+FAILED tests/test_decision.py::test_custom_provider_batch_index_mapping_and_bounds
+7 failed, 25 deselected in 3.34s

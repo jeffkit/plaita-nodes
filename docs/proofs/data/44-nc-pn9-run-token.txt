@@ -1,0 +1,78 @@
+=== A. plaita ExecutionContext 单测负控（回退 context.py）===
+F.F                                                                      [100%]
+=================================== FAILURES ===================================
+__ TestExecutionContextState.test_setup_flow_child_inherits_parent_run_token ___
+
+self = <tests.unit.test_context.TestExecutionContextState testMethod=test_setup_flow_child_inherits_parent_run_token>
+
+    def test_setup_flow_child_inherits_parent_run_token(self):
+        """子流程不复制 run_token，经 parent 回落到同一个 run 身份。"""
+        class FakeFlow:
+            flow_id = "child"
+            id = "child"
+            global_context = {}
+    
+        root = ExecutionContext()
+        root.clean()
+        root.setup_flow(FakeFlow(), (), {})
+        child = ExecutionContext(parent=root)
+        child.clean()
+        child.setup_flow(FakeFlow(), (), {})
+    
+        self.assertNotIn("run_token", child.get_state("$GLOBAL"))
+>       self.assertEqual(child.get_global_variable("run_token"), root.execution_id)
+E       AssertionError: None != 'aa0eea59f379419cafdd1a00f21df6ca'
+
+tests/unit/test_context.py:176: AssertionError
+_____ TestExecutionContextState.test_setup_flow_root_injects_per_run_token _____
+
+self = <tests.unit.test_context.TestExecutionContextState testMethod=test_setup_flow_root_injects_per_run_token>
+
+    def test_setup_flow_root_injects_per_run_token(self):
+        """plaita-nodes#9：根 run 注入 run_token；同一实例两次 run 不共享。"""
+        class FakeFlow:
+            flow_id = "f1"
+            id = "f1"
+            global_context = {}
+    
+        ctx = ExecutionContext()
+        ctx.clean()
+        ctx.setup_flow(FakeFlow(), (), {})
+        first = ctx.get_global_variable("run_token")
+>       self.assertEqual(first, ctx.execution_id)
+E       AssertionError: None != 'af01da2fd82742a18303aad156175bf9'
+
+tests/unit/test_context.py:153: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_context.py::TestExecutionContextState::test_setup_flow_child_inherits_parent_run_token
+FAILED tests/unit/test_context.py::TestExecutionContextState::test_setup_flow_root_injects_per_run_token
+2 failed, 1 passed, 36 deselected in 0.13s
+
+=== B. plaita-nodes 端到端负控（未修复 plaita：两 run 共用 default.jsonl）===
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_report_default_token_is_per_run_and_shared_with_map ___________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4082/test_report_default_token_is_p0')
+
+    def test_report_default_token_is_per_run_and_shared_with_map(tmp_path):
+        flow = Flow.model_validate(_flow(tmp_path))
+        expected = {"entries": [{"item": "a"}, {"item": "b"}, {"item": "c"}]}
+    
+        first = FlowExecution().run_compatible(flow, False)
+        second = FlowExecution().run_compatible(flow, False)
+    
+        assert first == expected
+>       assert second == expected
+E       AssertionError: assert {'entries': [...'item': 'c'}]} == {'entries': [...'item': 'c'}]}
+E         
+E         Differing items:
+E         {'entries': [{'item': 'a'}, {'item': 'b'}, {'item': 'c'}, {'item': 'a'}, {'item': 'b'}, {'item': 'c'}]} != {'entries': [{'item': 'a'}, {'item': 'b'}, {'item': 'c'}]}
+E         Use -v to get more diff
+
+tests/test_issue9_report_run_token.py:57: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita:flow.py:251 flow report-run-token structural check (non-fatal, flow still runs): [nodes[m].childFlow] 流程缺少 type=start 入口节点（共 3 个节点）。运行期这将抛 FlowStartMissingError——请添加 start 节点（FlowBuilder 用 start_with，@flow 前端自动补）。
+=========================== short test summary info ============================
+FAILED tests/test_issue9_report_run_token.py::test_report_default_token_is_per_run_and_shared_with_map
+1 failed in 0.29s
