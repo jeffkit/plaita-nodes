@@ -31,7 +31,12 @@ class FakeGh:
         self.bin = tmp_path / "fakebin"
         self.bin.mkdir(exist_ok=True)
         state = tmp_path / "gh_state.json"
-        state.write_text(json.dumps({"existing": existing_marker_count, "fail": fail}))
+        state.write_text(json.dumps({
+            # 去重查询走 `gh issue view --json comments`（pn#13 不再内插 jq）。
+            "comments": [{"body": "<!-- issue-pipeline -->"}
+                         for _ in range(existing_marker_count)],
+            "fail": fail,
+        }))
         self.state = state
         script = self.bin / "gh"
         body = textwrap.dedent(f"""
@@ -45,7 +50,7 @@ class FakeGh:
                 sys.stderr.write("gh boom")
                 sys.exit(1)
             if args[:2] == ["issue", "view"]:
-                print(json.dumps(st["existing"]))
+                print(json.dumps({{"comments": st["comments"]}}))
             elif args[:2] == ["issue", "comment"]:
                 body_file = args[args.index("--body-file") + 1]
                 with open({str(tmp_path / 'posted.md')!r}, 'w') as f:

@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -22,6 +23,10 @@ from typing import Any, ClassVar, List, Optional, Tuple
 from plaita import Node
 
 from ._git_env import build_git_env
+
+
+class GithubCommentError(RuntimeError):
+    """gh CLI 交互失败（去重查询失败/gh 缺失）。宁可报错，不静默发布。"""
 
 # 消毒规则（issue-pipeline 生产验证过的清单；\1 反向引用保留命令原文）
 _REDACT_PATTERNS: List[Tuple[re.Pattern, str]] = [
@@ -108,7 +113,8 @@ class GithubCommentNode(Node):
             r = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=self.timeout_secs, env=env)
         except FileNotFoundError as exc:
-            raise RuntimeError(f"github_comment：gh 不可用（{exc}）；请确认 PATH 含 gh CLI") from None
+            raise GithubCommentError(
+                f"github_comment：gh 不可用（{exc}）；请确认 PATH 含 gh CLI") from None
         if r.returncode != 0:
             return {"posted": False, "note": (r.stderr or "")[-200:]}
         return {"posted": True, "note": ""}
@@ -121,13 +127,33 @@ class GithubCommentNode(Node):
         return body
 
     def _already_commented(self, repo: str, number: int, marker: str) -> bool:
-        chk = subprocess.run(
-            ["gh", "issue", "view", str(number), "-R", repo, "--json", "comments",
-             "--jq", f'.comments | map(select(.body | contains("{marker}"))) | length'],
-            capture_output=True, text=True, timeout=self.timeout_secs,
-            env=build_git_env(),
+        # marker 只作为数据在 Python 侧做子串匹配，不内插进 jq 程序：否则
+        # 引号/反斜杠会改变查询语义（pn#13）。查询失败必须具名报错——把非零
+        # rc 当「无重复」会在 gh 故障时直接重发评论。
+        cmd = ["gh", "issue", "view", str(number), "-R", repo, "--json", "comments"]
+        try:
+            chk = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=self.timeout_secs, env=build_git_env())
+        except FileNotFoundError as exc:
+            raise GithubCommentError(
+                f"github_comment：去重查询需要 gh CLI（{exc}）；请确认 PATH 含 gh") from None
+        if chk.returncode != 0:
+            raise GithubCommentError(
+                "github_comment：去重查询失败"
+                f"（gh rc={chk.returncode}）：{(chk.stderr or '').strip()[-200:]}")
+        try:
+            payload = json.loads(chk.stdout or "")
+        except ValueError:
+            raise GithubCommentError(
+                f"github_comment：去重查询输出不是 JSON：{(chk.stdout or '')[:200]}") from None
+        comments = payload.get("comments") if isinstance(payload, dict) else None
+        if not isinstance(comments, list):
+            raise GithubCommentError(
+                f"github_comment：去重查询结果缺少 comments 数组：{str(payload)[:200]}")
+        return any(
+            isinstance(c, dict) and marker in str(c.get("body") or "")
+            for c in comments
         )
-        return chk.returncode == 0 and chk.stdout.strip() not in ("", "0")
 
     def _write_artifact(self, body: str, artifact_dir: Optional[str]) -> str:
         """正文落盘：artifact_dir 优先（留档），否则临时文件（gh --body-file 需要路径）。"""
