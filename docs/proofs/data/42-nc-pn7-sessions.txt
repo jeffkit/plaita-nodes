@@ -1,0 +1,80 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+________________ test_runtime_added_session_is_polled_and_kept _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106f8fe10>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4034/test_runtime_added_session_is_0')
+
+    def test_runtime_added_session_is_polled_and_kept(monkeypatch, tmp_path):
+        """启动后由外部写入者追加的 session，下一轮必须被轮询且条目保留。"""
+        sessions_path = tmp_path / "sessions.json"
+        sessions_path.write_text(json.dumps({
+            "exec-1": {"session_id": "sess-a"},
+        }), encoding="utf-8")
+    
+        requested: list[str] = []
+    
+        def fake_get(url, timeout=None):
+            session_id = url.rsplit("/", 1)[-1]
+            requested.append(session_id)
+            if session_id == "sess-a":
+                # 模拟并发写入者在 poller 运行期间追加一条新挂起的 HITL。
+                current = json.loads(sessions_path.read_text(encoding="utf-8"))
+                current["exec-2"] = {"session_id": "sess-b"}
+                sessions_path.write_text(json.dumps(current), encoding="utf-8")
+            return _Resp({"has_reply": False, "status": "waiting"})
+    
+        bus = _install_bus(monkeypatch)
+        _run_rounds(monkeypatch, sessions_path, rounds=2, fake_get=fake_get)
+    
+>       assert requested == ["sess-a", "sess-a", "sess-b"]
+E       AssertionError: assert ['sess-a', 'sess-a'] == ['sess-a', 'sess-a', 'sess-b']
+E         
+E         Right contains one more item: 'sess-b'
+E         Use -v to get more diff
+
+tests/test_issue7_hitl_sessions_lifecycle.py:89: AssertionError
+----------------------------- Captured stdout call -----------------------------
+hitl_poller 启动：1 个 session，间隔 0.01s，bus=memory
+____________ test_concurrent_append_survives_published_key_removal _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x106f8fce0>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4034/test_concurrent_append_survive0')
+
+    def test_concurrent_append_survives_published_key_removal(monkeypatch, tmp_path):
+        """删除已发布键时只能增量 pop，不能把并发追加的条目整份覆盖掉。"""
+        sessions_path = tmp_path / "sessions.json"
+        sessions_path.write_text(json.dumps({
+            "exec-a": {"session_id": "sess-a"},
+        }), encoding="utf-8")
+    
+        def fake_get(url, timeout=None):
+            session_id = url.rsplit("/", 1)[-1]
+            if session_id == "sess-a":
+                # 写回发生在同一轮稍后；这里模拟写者在轮询期间追加 exec-b。
+                current = json.loads(sessions_path.read_text(encoding="utf-8"))
+                current["exec-b"] = {"session_id": "sess-b"}
+                sessions_path.write_text(json.dumps(current), encoding="utf-8")
+                return _Resp({"has_reply": True, "replies": [{"content": "同意"}]})
+            return _Resp({"has_reply": False, "status": "waiting"})
+    
+        bus = _install_bus(monkeypatch)
+        _run_rounds(monkeypatch, sessions_path, rounds=1, fake_get=fake_get)
+    
+        assert [kwargs["session_id"] for _, kwargs in bus.publishes] == ["sess-a"]
+        on_disk = json.loads(sessions_path.read_text(encoding="utf-8"))
+>       assert on_disk == {"exec-b": {"session_id": "sess-b"}}
+E       AssertionError: assert {} == {'exec-b': {'...d': 'sess-b'}}
+E         
+E         Right contains 1 more item:
+E         {'exec-b': {'session_id': 'sess-b'}}
+E         Use -v to get more diff
+
+tests/test_issue7_hitl_sessions_lifecycle.py:120: AssertionError
+----------------------------- Captured stdout call -----------------------------
+hitl_poller 启动：1 个 session，间隔 0.01s，bus=memory
+  📨 exec-a → replied
+=========================== short test summary info ============================
+FAILED tests/test_issue7_hitl_sessions_lifecycle.py::test_runtime_added_session_is_polled_and_kept
+FAILED tests/test_issue7_hitl_sessions_lifecycle.py::test_concurrent_append_survives_published_key_removal
+2 failed in 0.88s
