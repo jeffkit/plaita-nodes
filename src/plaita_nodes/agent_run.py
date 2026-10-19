@@ -337,6 +337,66 @@ def _make_recursive_handlers():
 
 _DETAILS_CAP = 50  # 单次 agent 运行的观测条数上限，防超长会话撑爆 trace
 
+#: A2R8-05：协议行缓冲上限。此前 ``protocol_lines`` 无界 append——20k 行 ×
+#: 1 KiB 常驻约 19.8 MiB，长会话/恶意输出可线性撑大 worker 内存。行数与
+#: UTF-8 字节双闸，任一触界即停止驻留后续行，并留一条非 JSON 标记行。
+MAX_PROTOCOL_LINES = 10_000
+MAX_PROTOCOL_BYTES = 4 * 1024 * 1024
+
+
+class _ProtocolLineBuffer:
+    """有界协议行缓冲（A2R8-05）。
+
+    超限后**继续消费但不驻留**：runner 的回调仍被调用，后续行直接丢弃，
+    避免把截断变成执行失败。截断事实通过两条渠道暴露：末尾追加一条非 JSON
+    标记行（``parse_stream_details`` / usage 扫描会跳过），以及 WARNING 日志。
+    标记行不计入行/字节上限（上限外至多一条），保证截断永远可观测。
+    """
+
+    def __init__(self, *, redactor: Any = None,
+                 max_lines: Optional[int] = None,
+                 max_bytes: Optional[int] = None):
+        self._redactor = redactor
+        self._max_lines = MAX_PROTOCOL_LINES if max_lines is None else max_lines
+        self._max_bytes = MAX_PROTOCOL_BYTES if max_bytes is None else max_bytes
+        self._lines: list[str] = []
+        self._bytes = 0
+        self.truncated = False
+
+    @property
+    def lines(self) -> list[str]:
+        """已驻留的协议行（截断时最后一条为标记行）。"""
+        return self._lines
+
+    def append(self, line: str) -> None:
+        if self.truncated:
+            return
+        text = self._redactor.redact(line) if self._redactor is not None else line
+        if not isinstance(text, str):  # 防御：驱动若回调 bytes/其他类型
+            text = str(text)
+        size = len(text.encode("utf-8", "surrogatepass"))
+        if len(self._lines) >= self._max_lines or self._bytes + size > self._max_bytes:
+            self._mark_truncated(observed_lines=len(self._lines) + 1,
+                                 observed_bytes=self._bytes + size)
+            return
+        self._lines.append(text)
+        self._bytes += size
+
+    def _mark_truncated(self, *, observed_lines: int, observed_bytes: int) -> None:
+        kept_lines, kept_bytes = len(self._lines), self._bytes
+        self.truncated = True
+        self._lines.append(
+            "[plaita] protocol_lines truncated: kept "
+            f"{kept_lines} lines / {kept_bytes} bytes "
+            f"(limits {self._max_lines} lines / {self._max_bytes} bytes)"
+        )
+        _log.warning(
+            "agent 协议行超过上限，已截断：kept=%d lines/%d bytes，"
+            "limits=%d lines/%d bytes，首个越界行=%d/%d",
+            kept_lines, kept_bytes, self._max_lines, self._max_bytes,
+            observed_lines, observed_bytes,
+        )
+
 
 def parse_stream_details(lines) -> list[dict]:
     """把 recursive stream-json 行流解析为观测 observations 列表。
@@ -583,13 +643,13 @@ class AgentRunNode(Node):
         want_details = bool(execution.evaluate(self.details)) if self.details is not None else False
         if want_details and executor == "recursive":
             extra_env["RECURSIVE_OUTPUT_FORMAT"] = "stream-json"
-        # 协议行始终收集（纯内存 append）：executor 在进程内 NDJSON 路径不回调
-        # 通用 usage 捕获（claude-code 的 parse_event 不产 usage），节点的
+        # 协议行始终收集（有界内存：A2R8-05）：executor 在进程内 NDJSON 路径
+        # 不回调通用 usage 捕获（claude-code 的 parse_event 不产 usage），节点的
         # usage/observations 都从这里取。
-        protocol_lines: list[str] = []
+        protocol = _ProtocolLineBuffer()
 
         def _on_protocol_line(line: str) -> None:
-            protocol_lines.append(line)
+            protocol.append(line)
 
         # 观测归因（Langfuse generation 需 model 字段）：profile 显式 model →
         # provider 翻译出的执行器模型 env → agent 名兜底
@@ -635,7 +695,7 @@ class AgentRunNode(Node):
             raise AgentRunError(result.error or f"{agent_name} 退出码 {result.exit_code}")
 
         text, usage, observations = self._interpret_result(
-            executor=executor, result=result, protocol_lines=protocol_lines,
+            executor=executor, result=result, protocol_lines=protocol.lines,
             want_details=want_details)
 
         out = {"text": text, "cli": executor, "model": model,
@@ -770,10 +830,11 @@ class AgentRunNode(Node):
             ttl=runner_timeout + 60.0)
         lease.acquire()  # 冲突 → SandboxLeaseError（快速失败，error 终态 + 指引重投）
         envfile = sb.write_envfile(env_whitelist)
-        protocol_lines: list[str] = []
+        # 沙箱路径同样有界（A2R8-05）；脱敏在入缓冲前完成，字节按脱敏后计。
+        protocol = _ProtocolLineBuffer(redactor=redactor)
 
         def _on_protocol_line(line: str) -> None:
-            protocol_lines.append(redactor.redact(line))
+            protocol.append(line)
 
         try:
             lease.start_heartbeat()
@@ -811,7 +872,7 @@ class AgentRunNode(Node):
                     redactor.redact(result.error or f"{agent_name} 退出码 {result.exit_code}"))
 
             text, usage, observations = self._interpret_result(
-                executor=executor, result=result, protocol_lines=protocol_lines,
+                executor=executor, result=result, protocol_lines=protocol.lines,
                 redactor=redactor, want_details=want_details)
         finally:
             sb.burn_envfile(envfile)

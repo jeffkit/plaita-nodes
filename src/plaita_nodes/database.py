@@ -37,6 +37,12 @@ _cache_lock = threading.Lock()
 DEFAULT_MAX_ROWS = 1000
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 
+#: A2R8-04：单次 ``fetchmany`` 至多预取的行数（自适应批大小的硬上限）。
+#: 旧实现固定 256 行：行宽 128 KiB 时，第一次判限之前就已物化 32 MiB，
+#: ``max_bytes=1 KiB`` 的预算完全拦不住峰值。批大小改为按「剩余字节预算 /
+#: 已观测最大行宽」收缩，首行必单读——未知行宽时不得批量物化。
+MAX_FETCH_BATCH = 256
+
 
 class SqlResultLimitError(DeterministicError, RuntimeError):
     """SELECT 结果超过节点上限——fail-closed，不返回部分结果。
@@ -235,9 +241,13 @@ class SqlQueryNode(Node):
                 if result.returns_rows:
                     # plaita#205：分批读取并**先判上限再入列**——不先物化整表再
                     # 检查；超限 fail-closed 抛具名异常，绝不返回部分结果。
+                    # A2R8-04：批大小自适应——首行单读校准行宽，此后每批不
+                    # 超过「剩余字节预算 / 已知最大行宽」，避免固定 256 行在
+                    # 大行场景先把数十 MiB 拉进内存。
                     rows: list[Dict[str, Any]] = []
                     used_bytes = 0
-                    batch_size = 256
+                    max_row_bytes = 0
+                    batch_size = 1
                     while True:
                         if cancellation_requested(execution):
                             raise NodeCancelledError(
@@ -245,6 +255,7 @@ class SqlQueryNode(Node):
                         batch = result.fetchmany(batch_size)
                         if not batch:
                             break
+                        batch_max_row_bytes = 0
                         for row in batch:
                             item = dict(row._mapping)
                             encoded = json.dumps(item, ensure_ascii=False, default=str)
@@ -258,6 +269,16 @@ class SqlQueryNode(Node):
                                 )
                             rows.append(item)
                             used_bytes += size
+                            if size > batch_max_row_bytes:
+                                batch_max_row_bytes = size
+                        max_row_bytes = max(max_row_bytes, batch_max_row_bytes)
+                        # 剩余行数已用尽时仍读 1 行：用于判定「恰好等于上限」
+                        # 之后是否还有更多行；空批次即正常结束。
+                        by_bytes = (byte_limit - used_bytes) // max(max_row_bytes, 1)
+                        by_rows = row_limit - len(rows)
+                        batch_size = max(
+                            1, min(MAX_FETCH_BATCH, by_bytes, by_rows if by_rows > 0 else 1)
+                        )
                     return {"rows": rows, "rowcount": len(rows)}
                 return {"rowcount": result.rowcount}
             finally:
