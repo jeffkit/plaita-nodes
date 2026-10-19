@@ -1,0 +1,26 @@
+# pn#19 负控（pre-fix）：仅将 src/plaita_nodes/agent_run.py 还原为基线
+# 4e30339 的实现（finally 只清锁、不杀 agent），测试保留。
+# 命令：.venv/bin/python -m pytest tests/test_agent_run_stream.py -q --tb=short
+# 结果：3 failed / 5 passed（精确红：断连后 agent 仍存活且遗言锁已删除）
+....FFF.                                                                 [100%]
+=================================== FAILURES ===================================
+_ TestConsumerCloseTerminatesAgent.test_close_kills_agent_before_lock_release __
+tests/test_agent_run_stream.py:196: in test_close_kills_agent_before_lock_release
+    assert not _pid_alive(agent_pid), "close 后 agent 进程组必须已终止"
+E   AssertionError: close 后 agent 进程组必须已终止
+E   assert not True
+E    +  where True = _pid_alive(9683)
+_ TestConsumerCloseTerminatesAgent.test_disconnect_never_leaves_unlocked_live_agent _
+tests/test_agent_run_stream.py:223: in test_disconnect_never_leaves_unlocked_live_agent
+    assert not (alive and not lock_exists), (
+E   AssertionError: 断连后 agent 仍存活(pid=9696) 且遗言锁已删除：下一次 preflight 将放行并发写
+E   assert not (True and not False)
+_ TestConsumerCloseTerminatesAgent.test_unkillable_agent_keeps_lock_and_preflight_refuses _
+tests/test_agent_run_stream.py:245: in test_unkillable_agent_keeps_lock_and_preflight_refuses
+    monkeypatch.setattr(agent_run_mod, "_terminate_stream_process",
+E   AttributeError: <module 'plaita_nodes.agent_run' from '/Users/kong/projects/infra4agent/plaita-nodes/src/plaita_nodes/agent_run.py'> has no attribute '_terminate_stream_process'
+=========================== short test summary info ============================
+FAILED tests/test_agent_run_stream.py::TestConsumerCloseTerminatesAgent::test_close_kills_agent_before_lock_release
+FAILED tests/test_agent_run_stream.py::TestConsumerCloseTerminatesAgent::test_disconnect_never_leaves_unlocked_live_agent
+FAILED tests/test_agent_run_stream.py::TestConsumerCloseTerminatesAgent::test_unkillable_agent_keeps_lock_and_preflight_refuses
+3 failed, 5 passed in 4.60s

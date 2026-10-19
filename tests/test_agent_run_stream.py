@@ -9,17 +9,31 @@
 修复后：stderr 排水线程 + 看门狗线程（deadline 到 killpg 整个进程组）+
 EOF 后受 deadline 约束的 wait；逐行 yield 流式语义不变。
 
+#19：消费方提前关闭生成器（SSE 断连 / ``gen.close()``）时，旧实现只清
+遗言锁不杀 agent，留下「进程存活 + 锁已删」——下一次 preflight 看到 clean
+放行即并发写同一 workspace。现在 close/异常路径先 SIGKILL 进程组并确认
+终态，再清锁；无法确认终态则保留锁让 preflight 清场。正常完成路径不变。
+
 用 shell 桩脚本当"recursive"（经 RECURSIVE_BIN 注入，同 test_agent_run.py
 的做法）；用看门狗线程收割生成器，把"挂死"转化为可断言的失败而非卡死测试。
 """
 from __future__ import annotations
 
 import json
+import os
+import signal
 import threading
 
 import pytest
 
-from plaita_nodes.agent_run import recursive_stream_turn
+from agentproc.run_lock import _pid_alive, lock_path_for
+from plaita_nodes import agent_run as agent_run_mod
+from plaita_nodes.agent_run import (
+    AgentRunError,
+    _run_lock_key,
+    preflight_workspace,
+    recursive_stream_turn,
+)
 
 
 def _drain_generator(gen, timeout: float = 15.0) -> list:
@@ -133,3 +147,150 @@ class TestRecursiveStreamTurnRobustness:
         assert events[-1]["ok"] is False
         assert "超时" in events[-1]["error"]
         assert len(events) - 1 < 10  # 没等到全部行就被杀
+
+
+class TestConsumerCloseTerminatesAgent:
+    """#19：消费方提前关闭（SSE 断连 / ``gen.close()``）必须先终止 agent。
+
+    旧实现 ``finally`` 只清遗言锁、不杀进程：close 后 agent 仍存活且锁已
+    删除，下一次 ``preflight_workspace`` 看到 clean 放行 → 同 workspace
+    无锁并发写（窗口 = 剩余 timeout_secs，最长 1800s）。
+    """
+
+    def _register_sleeper(self, agent_config_repo, tmp_path, name, pidfile) -> None:
+        """agent 桩：写自身 pid 到文件，吐一行后长时间运行。"""
+        stub = agent_config_repo / f"stub-{name}.sh"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f"echo $$ > '{pidfile}'\n"
+            "echo started\n"
+            "sleep 30\n"
+        )
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, name)
+
+    @staticmethod
+    def _lock_file(tmp_path, run_key: str):
+        key = _run_lock_key(os.path.abspath(str(tmp_path)), run_key)
+        return lock_path_for(key)
+
+    def test_close_kills_agent_before_lock_release(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        """close 返回时 agent 已终态、锁已清（先杀组后清锁）。"""
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        pidfile = tmp_path / "agent.pid"
+        self._register_sleeper(agent_config_repo, tmp_path, "rec-close", pidfile)
+        lock_file = self._lock_file(tmp_path, "t-close")
+
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-close",
+            timeout_secs=60, run_key="t-close")
+        try:
+            assert next(gen) == {"type": "line", "text": "started"}
+            agent_pid = int(pidfile.read_text().strip())
+            assert _pid_alive(agent_pid)
+            assert lock_file.exists(), "运行中应有遗言锁"
+        finally:
+            gen.close()
+
+        assert not _pid_alive(agent_pid), "close 后 agent 进程组必须已终止"
+        assert not lock_file.exists(), "确认终态后才清锁"
+
+    def test_disconnect_never_leaves_unlocked_live_agent(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        """负控（pre-fix 形态）：断连后不得出现「agent 存活 + 锁已删」。
+
+        旧实现在本用例上精确红：close 后 agent 仍活、锁文件不存在，下一次
+        preflight 返回 clean 并放行并发写。
+        """
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        pidfile = tmp_path / "agent.pid"
+        self._register_sleeper(agent_config_repo, tmp_path, "rec-neg", pidfile)
+        lock_file = self._lock_file(tmp_path, "t-neg")
+
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-neg",
+            timeout_secs=60, run_key="t-neg")
+        try:
+            assert next(gen) == {"type": "line", "text": "started"}
+            agent_pid = int(pidfile.read_text().strip())
+        finally:
+            gen.close()
+
+        alive = _pid_alive(agent_pid)
+        lock_exists = lock_file.exists()
+        # 不变式：锁被清掉时 agent 必须已确认终态；否则 preflight 会放行。
+        assert not (alive and not lock_exists), (
+            f"断连后 agent 仍存活(pid={agent_pid}) 且遗言锁已删除："
+            "下一次 preflight 将放行并发写")
+        assert not alive, "close 路径应终止 agent"
+
+        info = preflight_workspace(str(tmp_path), run_key="t-neg")
+        assert info["action"] in ("clean", "stale")
+
+    def test_unkillable_agent_keeps_lock_and_preflight_refuses(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        """收尾无法确认终态时保锁——preflight 必须拒绝新 run（fail-closed）。"""
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        pidfile = tmp_path / "agent.pid"
+        self._register_sleeper(agent_config_repo, tmp_path, "rec-stuck", pidfile)
+        lock_file = self._lock_file(tmp_path, "t-stuck")
+
+        procs = []
+
+        def _pretend_kill_failed(proc):
+            procs.append(proc)
+            return False
+
+        monkeypatch.setattr(agent_run_mod, "_terminate_stream_process",
+                            _pretend_kill_failed)
+
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-stuck",
+            timeout_secs=60, run_key="t-stuck")
+        try:
+            assert next(gen) == {"type": "line", "text": "started"}
+            agent_pid = int(pidfile.read_text().strip())
+            gen.close()
+
+            assert _pid_alive(agent_pid)
+            assert lock_file.exists(), "agent 未确认终态时不得清锁"
+            with pytest.raises(AgentRunError):
+                preflight_workspace(str(tmp_path), run_key="t-stuck")
+        finally:
+            proc = procs[0] if procs else None
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001 — 清理不掩盖断言失败
+                    pass
+            lock_file.unlink(missing_ok=True)
+
+    def test_normal_completion_releases_lock_without_kill(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        """正常完成路径零变化：不触发击杀，完成后释放锁。"""
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        stub = agent_config_repo / "stub-normal.sh"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' '{\"result\": \"ok\", \"is_error\": false}'\n"
+        )
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-normal")
+        lock_file = self._lock_file(tmp_path, "t-normal")
+
+        killed = []
+        monkeypatch.setattr(agent_run_mod, "_kill_process_group",
+                            lambda proc: killed.append(proc))
+
+        events = _drain_generator(recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-normal",
+            timeout_secs=30, run_key="t-normal"))
+        assert events[-1]["type"] == "done"
+        assert events[-1]["ok"] is True
+        assert killed == [], "正常完成不应击杀进程"
+        assert not lock_file.exists(), "正常完成仍按原语义释放锁"

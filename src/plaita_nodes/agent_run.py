@@ -698,6 +698,8 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
         {"type": "line", "text": str}            # agent 原始输出行（宿主可实时展示）
         {"type": "done", "ok": bool, "result": str, "error": str}
     供宿主进程（如 plaita-console 的 AI 流程生成）把编码 Agent 作为生成后端复用。
+    消费方提前关闭生成器（SSE 断连 / ``gen.close()``）会终止 agent 进程组，
+    确认终态后才释放遗言锁（#19）。
     """
     import time as _time
 
@@ -730,7 +732,34 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
     try:
         yield from _stream_turn_body(proc, timeout_secs)
     finally:
-        _run_lock.clear_run_lock(lock_key)
+        # 消费方提前关闭（SSE 断连 / gen.close()）→ GeneratorExit 在本层
+        # finally 展开。必须先终止 agent 进程组并确认终态，再清遗言锁；
+        # 反过来（旧实现）留下「进程仍活 + 锁已删」，下一次 preflight 看到
+        # clean 即放行 → 同 workspace 无锁并发写（#19）。
+        if _terminate_stream_process(proc):
+            _run_lock.clear_run_lock(lock_key)
+        else:
+            _log.error(
+                "流式 agent pid=%s 未能确认终止，保留遗言锁 %s（workspace=%s）"
+                "供下次 preflight 清场",
+                proc.pid, lock_key, workspace_abs)
+
+
+def _terminate_stream_process(proc: subprocess.Popen) -> bool:
+    """收尾流式 agent：确保进程组已终止并回收；True = 已确认终态。
+
+    正常完成时 ``_stream_turn_body`` 已 wait 过子进程 → 不杀、立即返回。
+    提前关闭/异常退出时 SIGKILL 整组并做有界回收。返回 False 表示进程仍
+    可能存活（kill 被拒 / D 状态 / 回收超时）：调用方**不得清锁**，把清场
+    留给下一次 preflight 的 kill-before-start。
+    """
+    if proc.poll() is None:
+        _kill_process_group(proc)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
 
 
 def _stream_turn_body(proc: subprocess.Popen, timeout_secs: int):
