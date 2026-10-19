@@ -1,0 +1,46 @@
+FF.                                                                      [100%]
+=================================== FAILURES ===================================
+____________________ test_redirect_not_followed_by_default _____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10952e780>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4045/test_redirect_not_followed_by_0')
+servers = (<test_issue11_api_redirect._State object at 0x106910ad0>, <test_issue11_api_redirect._State object at 0x1068e5f90>, 'http://127.0.0.1:57578', 'http://127.0.0.1:57579')
+
+    def test_redirect_not_followed_by_default(monkeypatch, tmp_path, servers):
+        a, b, base_a, base_b = servers
+        a.status, a.location = 302, f"{base_b}/steal"
+    
+        out = _node(monkeypatch, tmp_path, base_a, path="start").execute(FakeExecution())
+    
+>       assert out["status"] == 302
+E       assert 200 == 302
+
+tests/test_issue11_api_redirect.py:95: AssertionError
+_____________ test_cross_origin_redirect_strips_credential_headers _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10952e650>
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4045/test_cross_origin_redirect_str0')
+servers = (<test_issue11_api_redirect._State object at 0x1068e5e50>, <test_issue11_api_redirect._State object at 0x10952e9e0>, 'http://127.0.0.1:57582', 'http://127.0.0.1:57583')
+
+    def test_cross_origin_redirect_strips_credential_headers(monkeypatch, tmp_path, servers):
+        a, b, base_a, base_b = servers
+        a.status, a.location = 302, f"{base_b}/steal"
+    
+        out = _node(monkeypatch, tmp_path, base_a, path="start",
+                    allow_redirects=True).execute(FakeExecution())
+    
+        assert out["status"] == 200
+        assert len(b.requests) == 1
+        headers = b.requests[0]["headers"]
+>       assert "x-api-key" not in headers, "跨源重定向把 X-Api-Key 转发到了外部主机"
+E       AssertionError: 跨源重定向把 X-Api-Key 转发到了外部主机
+E       assert 'x-api-key' not in {'host': '127.0.0.1:57583', 'user-agent': 'python-requests/2.34.2', 'accept-encoding': 'gzip, deflate', 'accept': '*/*', ...}
+
+tests/test_issue11_api_redirect.py:109: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.node.schema:basic.py:38 ApiRequestNode 'api': unknown config keys ['allow_redirects'] will be IGNORED (possible typo?). Known keys: ['body', 'credential', 'desc', 'dry_run', 'errorHandler', 'error_handler', 'id', 'method', 'name', 'next', 'output', 'path', 'query', 'raise_on_error', 'source_line', 'timeout', 'timeoutHandler', 'timeout_handler', 'timeout_ms', 'type']
+=========================== short test summary info ============================
+FAILED tests/test_issue11_api_redirect.py::test_redirect_not_followed_by_default
+FAILED tests/test_issue11_api_redirect.py::test_cross_origin_redirect_strips_credential_headers
+2 failed, 1 passed in 2.41s
+exit=1

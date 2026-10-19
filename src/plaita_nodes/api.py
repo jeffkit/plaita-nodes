@@ -8,7 +8,8 @@ api_request 是覆盖面最广的 REST 连接器：凭据提供 base_url 与静�
 from __future__ import annotations
 
 import re
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional, Tuple
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from pydantic import field_validator
@@ -22,6 +23,81 @@ from ._timeouts import positive_millis
 
 
 _TOKEN_RE = re.compile(r"\$(?:INPUT|NODE|GLOBAL)(?:\.\w+)+")
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 10
+# 请求体被重定向丢弃时，这些头必须同步移除（requests 原生行为）。
+_BODY_HEADERS = frozenset({"content-length", "content-type", "transfer-encoding"})
+
+
+def _origin(url: str) -> Tuple[str, str, Optional[int]]:
+    """(scheme, host, port) 三元组；默认端口归一化，非法 URL 视为不同源。"""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return ("", "", None)
+    scheme = parts.scheme.lower()
+    if port is None and scheme in ("http", "https"):
+        port = 80 if scheme == "http" else 443
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def _perform_request(method: str, url: str, headers: Dict[str, str],
+                     params: Optional[Dict[str, Any]], body: Any,
+                     timeout: float, allow_redirects: bool):
+    """发请求；默认不跟随重定向。
+
+    显式 ``allow_redirects=True`` 时手动跟随：跨源（scheme/host/port 任一
+    不同）跳转一律剥离凭据头——``requests`` 只自动剥 ``Authorization``，
+    ``X-Api-Key`` 等自定义鉴权头会原样转发到外部主机（pn#11）。同源跳转
+    保留凭据头；一旦跨源，后续 hop 不再回填。
+    """
+    current_method = method
+    current_url = url
+    current_headers = dict(headers)
+    current_params = params
+    current_body = body
+    hops = 0
+    while True:
+        kwargs: Dict[str, Any] = {
+            "headers": current_headers,
+            "timeout": timeout,
+            "allow_redirects": False,
+        }
+        if current_params:
+            kwargs["params"] = current_params
+        if current_body is not None:
+            kwargs["json"] = current_body
+        resp = requests.request(current_method, current_url, **kwargs)
+        if not allow_redirects or resp.status_code not in _REDIRECT_STATUSES:
+            return resp
+        location = resp.headers.get("Location")
+        if not location:
+            return resp
+        hops += 1
+        if hops > _MAX_REDIRECTS:
+            raise RuntimeError(f"API 请求重定向超过 {_MAX_REDIRECTS} 次，已中止")
+        target = urljoin(resp.url, location)
+        if _origin(target) != _origin(resp.url):
+            current_headers = {}
+        # 与 requests 的重定向方法语义一致：303 全改 GET，302 非 HEAD 改 GET，
+        # 301 仅 POST 改 GET；301/302/303 丢弃请求体，307/308 原样保留。
+        if resp.status_code == 303 and current_method != "HEAD":
+            current_method = "GET"
+        elif resp.status_code == 302 and current_method != "HEAD":
+            current_method = "GET"
+        elif resp.status_code == 301 and current_method == "POST":
+            current_method = "GET"
+        if resp.status_code not in (307, 308) or current_method in ("GET", "HEAD"):
+            current_body = None
+        if current_body is None:
+            current_headers = {
+                k: v for k, v in current_headers.items()
+                if k.lower() not in _BODY_HEADERS
+            }
+        current_url = target
+        current_params = None  # Location 已含完整 query，不能再追加
 
 
 def _interpolate(execution, text_value: str) -> str:
@@ -98,6 +174,9 @@ class ApiRequestNode(Node):
 
     path 支持 $INPUT/$NODE 表达式（如 "repos/$INPUT.org/issues"）；
     非 2xx 默认抛错（raise_on_error=false 时返回原始响应交由下游处理）。
+
+    重定向默认**不跟随**（``allow_redirects=False``），3xx 原样返回；显式开启
+    后仅同源跳转保留凭据头，跨源一律剥离（pn#11）。
     """
 
     node_type: ClassVar[str] = "api_request"
@@ -110,6 +189,7 @@ class ApiRequestNode(Node):
     body: Any = None
     timeout_ms: int = 15000
     raise_on_error: bool = True
+    allow_redirects: bool = False
     dry_run: bool = False
 
     @field_validator("timeout_ms", mode="before")
@@ -136,17 +216,14 @@ class ApiRequestNode(Node):
         headers = dict(cred.get("headers") or {})
         query = execution.evaluate(self.query) if self.query else None
         body = execution.evaluate(self.body) if self.body is not None else None
-        kwargs: Dict[str, Any] = {
-            "headers": headers,
-            "timeout": self.timeout_ms / 1000,
-        }
-        if query is not None:
-            kwargs["params"] = query
-        if body is not None and method not in ("GET", "HEAD"):
-            kwargs["json"] = body
+        if method in ("GET", "HEAD"):
+            body = None
 
         try:
-            resp = requests.request(method, url, **kwargs)
+            resp = _perform_request(
+                method, url, headers, query, body,
+                self.timeout_ms / 1000, self.allow_redirects,
+            )
         except requests.RequestException as exc:
             # 传输异常文本带完整 URL（base_url/query 里可能有凭据）；清洗后抛出。
             raise RuntimeError(_scrub_exception_text(exc)) from None
