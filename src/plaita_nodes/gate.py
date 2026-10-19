@@ -27,6 +27,7 @@ from pydantic import Field
 from plaita import Node
 
 from ._subprocess_env import build_subprocess_env, clip_output
+from ._tenant_guard import refuse_non_default_tenant
 
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
@@ -76,6 +77,10 @@ class GateNode(Node):
         if dry:
             return {"passed": True, "gate": self.gate_name, "exit_code": 0,
                     "stdout": "[dry-run]", "stderr": "", "retries": 0, "dry_run": True}
+
+        # 非 default 租户 spawn 前拒绝：子进程与 worker 同用户、共享解密密钥，
+        # 不是租户凭据隔离边界（pn#18，同构 plaita A42-06）。命令零执行机会。
+        refuse_non_default_tenant("gate")
 
         env = build_subprocess_env()
         exit_code, stdout, stderr = 1, "", ""

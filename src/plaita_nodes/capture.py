@@ -22,6 +22,7 @@ from typing import Any, ClassVar, Optional
 from plaita import Node
 
 from ._subprocess_env import build_subprocess_env, clip_output
+from ._tenant_guard import refuse_non_default_tenant
 
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
@@ -79,6 +80,10 @@ class CaptureNode(Node):
         if dry:
             return {"ok": True, "exit_code": 0, "stdout": f"[dry-run] would exec: {display}",
                     "stderr": "", "dry_run": True}
+
+        # 非 default 租户 spawn 前拒绝：子进程与 worker 同用户、共享解密密钥，
+        # 不是租户凭据隔离边界（pn#18，同构 plaita A42-06）。命令零执行机会。
+        refuse_non_default_tenant("capture")
 
         # 白名单重建 env：宿主凭据不进子进程；``env`` 字段是显式声明的 extra
         extra_env = {}
