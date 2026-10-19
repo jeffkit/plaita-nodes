@@ -22,6 +22,8 @@ from typing import Any, ClassVar, Dict, Optional
 from plaita.credentials import get_credential
 from plaita.node.basic import Node
 
+from ._retry import DeterministicError
+
 _engine_cache: Dict[str, Any] = {}
 _cache_lock = threading.Lock()
 
@@ -30,12 +32,15 @@ DEFAULT_MAX_ROWS = 1000
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 
 
-class SqlResultLimitError(RuntimeError):
+class SqlResultLimitError(DeterministicError, RuntimeError):
     """SELECT 结果超过节点上限——fail-closed，不返回部分结果。
 
     plaita#205：``sql_query`` 原先全量物化；大表会 OOM worker 并把整表写进
     checkpoint。超过 ``max_rows`` / ``max_bytes`` 时抛本异常（具名标记），
     日志/调用方能明确看到上限与已读规模；不静默截断（部分结果会让下游算错）。
+
+    确定性错误：同一 SQL + 同一上限重跑必然再次超限，``retryTimes`` 重试只会
+    重复执行 SQL（A2R7-04）。
     """
 
     def __init__(

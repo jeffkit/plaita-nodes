@@ -1,0 +1,8 @@
+D) capture: flow 返回于 0.31s, error=NodeTimeoutError, cancel_event_set=True
+   child_pid=56621 alive_after_flow_return+0.9s=False
+   late_side_effect_after_flow_timeout=False path=/tmp/a2r8_capture_late_side_effect.txt
+   node-timeout 已置位 cancel_event，但 capture 未消费
+D) gate: flow 返回于 0.31s, error=NodeTimeoutError, cancel_event_set=True
+   child_pid=56684 alive_after_flow_return+0.9s=False
+   late_side_effect_after_flow_timeout=False path=/tmp/a2r8_gate_late_side_effect.txt
+   node-timeout 已置位 cancel_event，但 gate 未消费

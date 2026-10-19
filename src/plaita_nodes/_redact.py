@@ -6,7 +6,9 @@ plaita 主仓的唯一渲染路径是 ``plaita/core/url_redaction._scrub_url_tex
 
 * :func:`_scrub_url_text` —— 任意文本里的绝对 URL 只留
   ``scheme://host[:port]``，path 的每一段与整条 query/fragment 一律 ``***``；
-  非 http(s) scheme / 畸形 URL / 无法编码的串退化为安全常量；
+  requests/urllib3 的 ``Max retries exceeded with url: /path?token`` 是**相对
+  URL**，按同一规则逐段打码；非 http(s) scheme / 畸形 URL / 无法编码的串
+  退化为安全常量；
 * :func:`_scrub_exception_text` —— ``str(exc)`` **与整条 traceback** 一起渲染
   再清洗。调用方以纯文本参数记录、不再传 ``exc_info``：``Formatter`` 会在
   logger 调用之后用 ``exc_info`` 重新渲染 traceback（末行就是 ``str(exc)``），
@@ -39,12 +41,34 @@ _SAFE_SCHEMES = frozenset({"http", "https"})
 #: ``\s`` 对 str 是 Unicode 感知的，NBSP / 全角空格会把 URL 截断在凭据之前。
 _ABSOLUTE_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^ \t\r\n\f\v]+")
 
+#: requests/urllib3 的传输异常用**相对 URL** 报错，绝对 URL 规则抓不到：
+#: ``Max retries exceeded with url: /open-apis/bot/v2/hook/<token>``。
+#: 只认 ``url:`` / ``url=`` 标签后的路径串（IM webhook token 在 path/query
+#: 的固定形状），避免把普通诊断文本里的斜杠路径当作凭据打码。
+_RELATIVE_URL_RUN_RE = re.compile(
+    r"(?i)(\bwith url\s*[:=]\s*)(/[^\s\"')\]]+)"
+)
+
 #: ``password=…`` / ``token: …`` 这类裸凭据运行（无 URL 形状时的兜底）。
 #: 只认**凭据键名**，``code=1002`` / ``port=8080`` 等诊断文本原样保留。
 _CREDENTIAL_RUN_RE = re.compile(
     r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key"
     r"|client[_-]?secret|private[_-]?key)\b(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s&,;]+)"
 )
+
+
+def _render_relative_url(match: "re.Match[str]") -> str:
+    """``with url: /a/b?token=…`` → 每段 path / query / fragment 换占位。"""
+    prefix, token = match.group(1), match.group(2)
+    path, sep, tail = token.partition("?")
+    if not sep:
+        path, sep, tail = path.partition("#")
+    rendered = "/".join(
+        PLACEHOLDER if segment else segment for segment in path.split("/")
+    )
+    if sep:
+        rendered += f"{sep}{PLACEHOLDER}"
+    return f"{prefix}{rendered}"
 
 
 def _render_url(token: str) -> str:
@@ -95,6 +119,7 @@ def _scrub_url_text(text: object) -> str:
             return UNPRINTABLE
     try:
         scrubbed = _ABSOLUTE_URL_RE.sub(lambda m: _render_url(m.group(0)), text)
+        scrubbed = _RELATIVE_URL_RUN_RE.sub(_render_relative_url, scrubbed)
         scrubbed = _CREDENTIAL_RUN_RE.sub(
             lambda m: f"{m.group(1)}{m.group(2)}{PLACEHOLDER}", scrubbed
         )

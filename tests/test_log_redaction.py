@@ -34,6 +34,25 @@ def test_bare_credential_run_is_masked_but_diagnostics_survive():
     assert "code=1002" in text and "port=8080" in text
 
 
+def test_relative_url_run_is_masked():
+    """requests 的 ``with url: /path?token`` 是相对 URL——绝对 URL 规则抓不到。
+
+    IM webhook token 就在这个形态里（Feishu/Slack path、DingTalk query），
+    A2R8-01 的异常文本必须按段打码。
+    """
+    text = _scrub_url_text(
+        "Max retries exceeded with url: /open-apis/bot/v2/hook/SECRET "
+        "(Caused by NewConnectionError(...))")
+    assert "SECRET" not in text
+    assert "/***/***/***/***/***" in text
+    assert "Max retries exceeded" in text
+
+    query = _scrub_url_text(
+        "Max retries exceeded with url: /robot/send?access_token=TOKEN&x=1")
+    assert "TOKEN" not in query and "x=1" not in query
+    assert "/***/***?***" in query
+
+
 def test_scrub_url_text_is_total():
     assert isinstance(_scrub_url_text(None), str)
     assert isinstance(_scrub_url_text(12345), str)

@@ -17,11 +17,13 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ._retry import DeterministicError
+
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-class AgentConfigError(RuntimeError):
-    pass
+class AgentConfigError(DeterministicError, RuntimeError):
+    """agents/providers 配置错误——确定性，不被 retryTimes 重试（A2R7-04）。"""
 
 
 def _candidate_dirs(repo: Optional[str]) -> list[Path]:

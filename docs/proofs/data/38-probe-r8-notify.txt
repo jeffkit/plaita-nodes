@@ -1,0 +1,67 @@
+== 1) 200 + 业务错误码 ==
+feishu_webhook     out={'status': 200, 'response': {'code': 19003, 'msg': 'sign match fail'}}  -> success=True
+wecom_webhook      out={'status': 200, 'response': {'errcode': 93000, 'errmsg': 'invalid webhook url'}}  -> success=True
+dingtalk_webhook   out={'status': 200, 'response': {'errcode': 310000, 'errmsg': 'sign not match'}}  -> success=True
+slack_webhook      out={'status': 200, 'response': 'no_service'}  -> success=True
+
+== 2) 传输异常文本携带 URL 凭据 ==
+exception_type = RuntimeError
+token_in_exception = False
+exception_text = Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.13/site-packages/urllib3/connection.py", line 204, in _new_conn
+    sock = connection.create_connection(
+        (self._dns_host, self.port),
+    ...<2 lines>...
+        socket_options=self.socket_options,
+    )
+  File "/opt/homebrew/lib/python3.13/site-packages/urllib3/util/connection.py", line 85, in create_connection
+    raise
+
+== 2b) 真实 Flow 执行器错误文案 ==
+flow_exception_type = NodeExecutionError
+token_in_flow_error = False
+flow_error_text = 执行节点n出错了: RuntimeError: Traceback (most recent call last):
+  File "/opt/homebrew/lib/python3.13/site-packages/urllib3/connection.py", line 204, in _new_conn
+    sock = connection.create_connection(
+        (self._dns_host, self.port),
+    ...<2 lines>...
+        socket_options=self.socket_options,
+    )
+  File "/opt/homebrew/lib/python3.13/site-packages/urllib3/util/connection.py", line 85, in create_connection
+    raise err
+  File "/opt/homebrew/lib/python3.13/site-packages/urllib3/util/connect
+
+== 3) 签名面 ==
+dingtalk_webhook   path=/hook?timestamp=1792383595587&sign=0YX0hRta1KwdDTKbVSuQWs85gS7%2Bl%2FzSgpKVgu7Xbng%3D sign=True timestamp=True
+feishu_webhook     path=/hook sign=False timestamp=False
+
+== 4) 超时/重试面 ==
+  post timeout arg = 15
+500_error = RuntimeError webhook 调用失败 HTTP 500: {'errcode': 500}
+post_calls_for_one_node_execution = 1
+http_500_retried_in_process = False
+
+== 5) 超时参数 ==
+def _post_json(url: str, payload: Dict[str, Any]) -> dict:
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        # requests 的 ConnectionError/Timeout 文本带完整 URL path/query：
+        # Feishu/Slack 的机器人 token 在 path，DingTalk 的 access_token 在
+        # query。清洗成 ``scheme://host`` 后再抛出，绝不让 token 进
+        # NodeExecutionError → state.error / worker 日志（A2R8-01）。
+        raise RuntimeError(_scrub_exception_text(exc)) from None
+    ok = resp.status_code == 200
+    try:
+        body: Any = resp.json()
+    except ValueError:
+        body = resp.text[:200]
+    if not ok:
+        detail = _scrub_url_text(
+            f"webhook 调用失败 HTTP {resp.status_code}: {body}")
+        # 4xx（408/425/429 除外）是请求本身的确定性错误——不被 retryTimes
+        # 放大成重复群消息；5xx/限流保持可重试（A2R7-04）。
+        if is_retryable_http_status(resp.status_code):
+            raise RuntimeError(detail)
+        raise DeterministicRuntimeError(detail)
+    return {"status": resp.status_code, "response": body}

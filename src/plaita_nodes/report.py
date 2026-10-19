@@ -91,6 +91,12 @@ class ReportNode(Node):
         return safe_component(raw, kind="report token")
 
     def execute(self, execution: Any) -> dict:
+        # 非法 action 在任何文件系统动作之前具名拒绝。历史上未知值静默按
+        # write 处理（拼错 action 却落盘）；现在与 rate_limit 一致抛
+        # ValueError——确定性错误，不被 retryTimes 重试（A2R7-04）。
+        if self.action not in ("write", "read"):
+            raise ValueError(
+                f"未知 report action: {self.action!r}（write|read）")
         base_dir = self._dir(execution)
         token = self._token(execution)
         if self.action == "read":

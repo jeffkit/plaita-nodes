@@ -1,0 +1,131 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+___ test_cancel_kills_subprocess_and_prevents_late_side_effect[CaptureNode] ____
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3958/test_cancel_kills_subprocess_a0')
+node_cls = <class 'plaita_nodes.capture.CaptureNode'>
+
+    @pytest.mark.parametrize("node_cls", [CaptureNode, GateNode])
+    def test_cancel_kills_subprocess_and_prevents_late_side_effect(tmp_path, node_cls):
+        pid_file = tmp_path / "child.pid"
+        sentinel = tmp_path / "late.txt"
+        script = _side_effect_script(pid_file, sentinel)
+        cancel = threading.Event()
+        exec_ = _Exec(cancel)
+        fields = {"id": "n", "command": [sys.executable, "-c", script],
+                  "timeout_secs": 5}
+        if node_cls is GateNode:
+            fields["max_retries"] = 2
+        node = node_cls(**fields)
+    
+        thread, result = _run_in_thread(lambda: node.execute(exec_))
+        assert _wait_for(pid_file.exists), "子进程未启动"
+        pid = int(pid_file.read_text().split()[0])
+    
+        cancel.set()
+        thread.join(1.0)
+>       assert not thread.is_alive(), "取消后 1s 内节点线程未退出"
+E       AssertionError: 取消后 1s 内节点线程未退出
+E       assert not True
+E        +  where True = is_alive()
+E        +    where is_alive = <Thread(Thread-1 (target), started 6119763968)>.is_alive
+
+tests/test_a2r8_cancel.py:114: AssertionError
+_____ test_cancel_kills_subprocess_and_prevents_late_side_effect[GateNode] _____
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3958/test_cancel_kills_subprocess_a1')
+node_cls = <class 'plaita_nodes.gate.GateNode'>
+
+    @pytest.mark.parametrize("node_cls", [CaptureNode, GateNode])
+    def test_cancel_kills_subprocess_and_prevents_late_side_effect(tmp_path, node_cls):
+        pid_file = tmp_path / "child.pid"
+        sentinel = tmp_path / "late.txt"
+        script = _side_effect_script(pid_file, sentinel)
+        cancel = threading.Event()
+        exec_ = _Exec(cancel)
+        fields = {"id": "n", "command": [sys.executable, "-c", script],
+                  "timeout_secs": 5}
+        if node_cls is GateNode:
+            fields["max_retries"] = 2
+        node = node_cls(**fields)
+    
+        thread, result = _run_in_thread(lambda: node.execute(exec_))
+        assert _wait_for(pid_file.exists), "子进程未启动"
+        pid = int(pid_file.read_text().split()[0])
+    
+        cancel.set()
+        thread.join(1.0)
+>       assert not thread.is_alive(), "取消后 1s 内节点线程未退出"
+E       AssertionError: 取消后 1s 内节点线程未退出
+E       assert not True
+E        +  where True = is_alive()
+E        +    where is_alive = <Thread(Thread-2 (target), started 6136590336)>.is_alive
+
+tests/test_a2r8_cancel.py:114: AssertionError
+____________________ test_flow_timeout_kills_capture_child _____________________
+
+tmp_path = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3958/test_flow_timeout_kills_captur0')
+
+    def test_flow_timeout_kills_capture_child(tmp_path):
+        """真实引擎节点超时（cancel_event）→ 子进程随之终止、sentinel 不落盘。"""
+        pid_file = tmp_path / "child.pid"
+        sentinel = tmp_path / "late.txt"
+        script = _side_effect_script(pid_file, sentinel)
+        flow = Flow.model_validate({
+            "nodes": [
+                {"type": "start", "id": "start", "next": "n"},
+                {"type": "capture", "id": "n",
+                 "command": [sys.executable, "-c", script],
+                 "timeout_secs": 30, "next": "end", "timeout": "PT0.3S"},
+                {"type": "end", "id": "end", "resultType": "success",
+                 "output": "$NODE.n"},
+            ]
+        })
+        started = time.monotonic()
+        with pytest.raises(Exception):  # NodeTimeoutError
+            FlowExecution().run_compatible(flow, False)
+        assert time.monotonic() - started < 2.0
+    
+        assert _wait_for(pid_file.exists), "子进程未启动"
+        pid = int(pid_file.read_text().split()[0])
+        assert _wait_for(lambda: not _pid_alive(pid), 1.0), \
+            "flow 返回后 1s 内子进程未退出"
+    
+        remaining = 1.7 - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(remaining)
+>       assert not sentinel.exists(), "flow 超时返回后子进程仍写盘"
+E       AssertionError: flow 超时返回后子进程仍写盘
+E       assert not True
+E        +  where True = exists()
+E        +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-3958/test_flow_timeout_kills_captur0/late.txt').exists
+
+tests/test_a2r8_cancel.py:153: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  plaita.core.runner:runner.py:682 Sync node n timed out after 300ms (cancel_event set)
+______________________ test_hitl_polling_stops_on_cancel _______________________
+
+    def test_hitl_polling_stops_on_cancel():
+        stub = _HitlStub()
+        cancel = threading.Event()
+        node = HitlNode(id="h", message="ok?", base_url=stub.url,
+                        timeout_secs=8, poll_interval=5.0)
+        try:
+            thread, result = _run_in_thread(lambda: node.execute(_Exec(cancel)))
+            assert _wait_for(lambda: stub.polls >= 1, 2.0)
+            cancel.set()
+            # poll_interval=5s：能被 cancel_event 唤醒才可能在 1s 内退出
+            thread.join(1.0)
+>           assert not thread.is_alive(), "取消后 hitl 未停止轮询"
+E           AssertionError: 取消后 hitl 未停止轮询
+E           assert not True
+E            +  where True = is_alive()
+E            +    where is_alive = <Thread(Thread-4 (target), started 6325039104)>.is_alive
+
+tests/test_a2r8_cancel.py:205: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_a2r8_cancel.py::test_cancel_kills_subprocess_and_prevents_late_side_effect[CaptureNode]
+FAILED tests/test_a2r8_cancel.py::test_cancel_kills_subprocess_and_prevents_late_side_effect[GateNode]
+FAILED tests/test_a2r8_cancel.py::test_flow_timeout_kills_capture_child - Ass...
+FAILED tests/test_a2r8_cancel.py::test_hitl_polling_stops_on_cancel - Asserti...
+4 failed in 5.71s

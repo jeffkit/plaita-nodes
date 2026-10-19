@@ -11,9 +11,14 @@ import re
 from typing import Any, ClassVar, Dict, Optional
 
 import requests
+from pydantic import field_validator
 
 from plaita.credentials import get_credential
 from plaita.node.basic import Node
+
+from ._redact import _scrub_exception_text, _scrub_url_text
+from ._retry import DeterministicRuntimeError, is_retryable_http_status
+from ._timeouts import positive_millis
 
 
 _TOKEN_RE = re.compile(r"\$(?:INPUT|NODE|GLOBAL)(?:\.\w+)+")
@@ -48,6 +53,13 @@ class GenericWebhookNode(Node):
     timeout_ms: int = 15000
     dry_run: bool = False
 
+    @field_validator("timeout_ms", mode="before")
+    @classmethod
+    def _validate_timeout_ms(cls, value: Any) -> Any:
+        # 0/负值原先拖到 requests 连接前才抛；构造期具名拒绝（A2R7-05）。
+        positive_millis("generic_webhook timeout_ms", value)
+        return value
+
     def execute(self, execution):
         # dry-run 最先判：不解析凭据、不发请求
         if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
@@ -58,9 +70,17 @@ class GenericWebhookNode(Node):
         if not url:
             raise ValueError(f"凭据 {self.credential!r} 缺少 url 字段")
         body = execution.evaluate(self.payload)
-        resp = requests.post(url, json=body, timeout=self.timeout_ms / 1000)
+        try:
+            resp = requests.post(url, json=body, timeout=self.timeout_ms / 1000)
+        except requests.RequestException as exc:
+            # 传输异常文本会带完整 URL（凭据 query 里可能有 token）；清洗后抛出。
+            raise RuntimeError(_scrub_exception_text(exc)) from None
         if resp.status_code >= 400:
-            raise RuntimeError(f"webhook 调用失败 HTTP {resp.status_code}: {resp.text[:200]}")
+            detail = _scrub_url_text(
+                f"webhook 调用失败 HTTP {resp.status_code}: {resp.text[:200]}")
+            if is_retryable_http_status(resp.status_code):
+                raise RuntimeError(detail)
+            raise DeterministicRuntimeError(detail)
         try:
             data: Any = resp.json()
         except ValueError:
@@ -92,6 +112,13 @@ class ApiRequestNode(Node):
     raise_on_error: bool = True
     dry_run: bool = False
 
+    @field_validator("timeout_ms", mode="before")
+    @classmethod
+    def _validate_timeout_ms(cls, value: Any) -> Any:
+        # 0/负值原先拖到 requests 连接前才抛；构造期具名拒绝（A2R7-05）。
+        positive_millis("api_request timeout_ms", value)
+        return value
+
     def execute(self, execution):
         # dry-run 最先判：不解析凭据、不发请求
         if self.dry_run or bool(execution.get_global_variable("dry_run", False)):
@@ -118,11 +145,20 @@ class ApiRequestNode(Node):
         if body is not None and method not in ("GET", "HEAD"):
             kwargs["json"] = body
 
-        resp = requests.request(method, url, **kwargs)
+        try:
+            resp = requests.request(method, url, **kwargs)
+        except requests.RequestException as exc:
+            # 传输异常文本带完整 URL（base_url/query 里可能有凭据）；清洗后抛出。
+            raise RuntimeError(_scrub_exception_text(exc)) from None
         try:
             data: Any = resp.json()
         except ValueError:
             data = resp.text[:2000]
         if resp.status_code >= 400 and self.raise_on_error:
-            raise RuntimeError(f"API 请求失败 HTTP {resp.status_code}: {str(data)[:200]}")
+            detail = _scrub_url_text(
+                f"API 请求失败 HTTP {resp.status_code}: {str(data)[:200]}")
+            # 401/403/404 等确定性 4xx 不被 retryTimes 重复发请求（A2R7-04）。
+            if is_retryable_http_status(resp.status_code):
+                raise RuntimeError(detail)
+            raise DeterministicRuntimeError(detail)
         return {"status": resp.status_code, "data": data}

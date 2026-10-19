@@ -15,21 +15,24 @@ from __future__ import annotations
 
 import os
 import shlex
-import signal
 import subprocess
 from typing import Any, ClassVar, Optional
 
 from plaita import Node
+from pydantic import field_validator
 
+from ._cancel import communicate_cancellable
+from ._retry import DeterministicError
 from ._subprocess_env import build_subprocess_env, clip_output
 from ._tenant_guard import refuse_non_default_tenant
+from ._timeouts import positive_seconds
 
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
 
 
-class CaptureConfigError(RuntimeError):
-    pass
+class CaptureConfigError(DeterministicError, RuntimeError):
+    """配置错误（缺 command / 空命令）——确定性，不被 retryTimes 重试。"""
 
 
 class CaptureNode(Node):
@@ -38,10 +41,16 @@ class CaptureNode(Node):
     JSON 字段：
     - ``command``: 字符串（shlex 切分）或字符串列表（元素支持 ``{% %}`` 表达式）
     - ``cwd``: 工作目录（默认进程 cwd）
-    - ``timeout_secs``: 超时秒数，默认 120；超时 kill 进程组后返回 exit_code=124
+    - ``timeout_secs``: 超时秒数，默认 120；超时 kill 进程组后返回 exit_code=124。
+      非正数（0/负值）在构造期具名拒绝（A2R7-05，fail-closed）
     - ``env``: 附加环境变量（表达式，求值后叠加到白名单重建的子进程 env 上）
     - ``stdin``: 可选，传给子进程的标准输入文本（表达式；长文本走 stdin 避开 ARG_MAX）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时返回 fake 结果不执行
+
+    取消：等待期间消费 ``execution.cancel_event`` / ``cancel_requested``
+    （引擎节点超时或 ``FlowExecution.cancel()`` 置位）——killpg 整组后抛
+    :class:`~plaita_nodes._cancel.NodeCancelledError`，流程返回后不再留下
+    继续写盘的子进程（A2R8-02）。
 
     输出：``{"ok", "exit_code", "stdout", "stderr", "dry_run"}``；stdout/stderr
     超阈值时头尾保留并标注省略量（详见模块 docstring）。
@@ -56,6 +65,14 @@ class CaptureNode(Node):
     env: Optional[Any] = None
     stdin: Optional[Any] = None
     dry_run: bool = False
+
+    @field_validator("timeout_secs", mode="before")
+    @classmethod
+    def _validate_timeout_secs(cls, value: Any) -> Any:
+        # 0 原先等于 communicate(timeout=0) 的立即 kill；与 gate/api 统一为
+        # 构造期 fail-closed（A2R7-05）。
+        positive_seconds("capture timeout_secs", value)
+        return value
 
     def execute(self, execution: Any) -> dict:
         if self.command is None:
@@ -98,16 +115,11 @@ class CaptureNode(Node):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        timed_out = False
-        try:
-            stdout, stderr = proc.communicate(input=stdin_text, timeout=self.timeout_secs)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = proc.communicate()
+        # 等待期间消费 cancel_event/cancel_requested：取消或自身超时都先
+        # killpg 整组、有界回收管道（A2R8-02）。
+        stdout, stderr, timed_out = communicate_cancellable(
+            proc, float(self.timeout_secs), execution, "capture",
+            input_text=stdin_text)
 
         exit_code = 124 if timed_out else (proc.returncode or 0)
         return {"ok": exit_code == 0, "exit_code": exit_code,

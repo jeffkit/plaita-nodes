@@ -24,6 +24,9 @@ from pydantic import Field
 
 from plaita import Node
 
+from ._redact import _scrub_exception_text, _scrub_url_text
+from ._retry import DeterministicError, is_retryable_http_status
+
 try:
     from .config import load_merged_config, resolve_provider
 except ImportError:  # 平铺布局兜底
@@ -36,6 +39,15 @@ class LlmError(RuntimeError):
     pass
 
 
+class LlmDeterministicError(LlmError, DeterministicError):
+    """确定性 LLM 错误（端点配置 / 401·403·404 等 4xx / 缺消息）。
+
+    同时是 ``LlmError``（既有捕获面不变）与 ``ValueError``（引擎判为
+    ``retryTimes`` 不重试，A2R7-04）。429/5xx/网络异常仍抛 ``LlmError``，
+    保留退避重试。
+    """
+
+
 def resolve_llm_endpoint(api_base: Optional[str], api_key: Optional[str],
                          model: Optional[str],
                          provider_name: Optional[str] = None) -> tuple[str, str, str]:
@@ -45,7 +57,8 @@ def resolve_llm_endpoint(api_base: Optional[str], api_key: Optional[str],
         try:
             bundle = resolve_provider(provider_name, load_merged_config("providers"))
         except Exception as exc:  # noqa: BLE001
-            raise LlmError(f"provider '{provider_name}' 解析失败: {exc}") from exc
+            raise LlmDeterministicError(
+                f"provider '{provider_name}' 解析失败: {exc}") from exc
         api_base = api_base or bundle.get("apiBase")
         api_key = api_key or bundle.get("apiKey")
         model = model or bundle.get("model")
@@ -54,7 +67,7 @@ def resolve_llm_endpoint(api_base: Optional[str], api_key: Optional[str],
     api_key = api_key or os.environ.get("LLM_API_KEY", "")
     model = model or os.environ.get("LLM_MODEL", "")
     if not (api_base and api_key and model):
-        raise LlmError(
+        raise LlmDeterministicError(
             "LLM 端点不完整：需要 api_base/api_key/model（字段、provider 或 "
             "LLM_API_BASE/LLM_API_KEY/LLM_MODEL 环境变量）")
     return str(api_base).rstrip("/"), str(api_key), str(model)
@@ -116,7 +129,7 @@ class LlmNode(Node):
             prompt = execution.evaluate(self.prompt) if self.prompt is not None else ""
             messages.append({"role": "user", "content": str(prompt or "")})
         if not messages:
-            raise LlmError("llm 节点缺少消息（prompt/messages）")
+            raise LlmDeterministicError("llm 节点缺少消息（prompt/messages）")
 
         api_base, api_key, model = self._resolve_endpoint(execution)
         body: dict = {"model": model, "messages": messages, "temperature": self.temperature}
@@ -129,11 +142,20 @@ class LlmNode(Node):
             if isinstance(merged, dict):
                 body.update(merged)
 
-        resp = requests.post(f"{api_base}/chat/completions",
-                             headers={"Authorization": f"Bearer {api_key}"},
-                             json=body, timeout=self.timeout_secs)
+        try:
+            resp = requests.post(f"{api_base}/chat/completions",
+                                 headers={"Authorization": f"Bearer {api_key}"},
+                                 json=body, timeout=self.timeout_secs)
+        except requests.RequestException as exc:
+            # 传输异常文本带完整 URL；清洗后再抛出（与 webhook 同一纪律）。
+            raise RuntimeError(_scrub_exception_text(exc)) from None
         if resp.status_code >= 400:
-            raise LlmError(f"LLM 请求失败 {resp.status_code}: {resp.text[:300]}")
+            detail = _scrub_url_text(
+                f"LLM 请求失败 {resp.status_code}: {resp.text[:300]}")
+            # 401/403/404 等确定性 4xx 不重试；429/5xx 保持退避重试（A2R7-04）。
+            if is_retryable_http_status(resp.status_code):
+                raise LlmError(detail)
+            raise LlmDeterministicError(detail)
         data = resp.json()
         try:
             text = data["choices"][0]["message"]["content"] or ""

@@ -3,7 +3,13 @@
 节点通过 pyproject 的 ``[project.entry-points."plaita.nodes"]`` 自动注册；
 若以源码方式引入（未经 pip 安装），可显式调用 :func:`register_all`。
 """
-from .agent_run import AgentRunError, AgentRunNode, extract_recursive_result, register_recursive_direct
+from .agent_run import (
+    AgentRunConfigError,
+    AgentRunError,
+    AgentRunNode,
+    extract_recursive_result,
+    register_recursive_direct,
+)
 from .api import ApiRequestNode, GenericWebhookNode
 from .database import SqlQueryNode, SqlResultLimitError
 from .decision import DECISION_PROVIDERS, DecisionError, DecisionNode, register_decision_provider
@@ -23,7 +29,7 @@ from .config import (
 from .hitl import HitlError, HitlNode
 from .gate import GateNode
 from .hitl_await import HitlAwaitNode
-from .llm import LlmError, LlmNode
+from .llm import LlmDeterministicError, LlmError, LlmNode
 from .rate_limit import RateLimitNode
 from .report import ReportNode, append_entry, read_entries
 from .notify import NotifyNode
@@ -46,9 +52,11 @@ def register_all() -> None:
 
 
 __all__ = [
-    "AgentRunNode", "AgentRunError", "extract_recursive_result", "register_recursive_direct",
+    "AgentRunNode", "AgentRunError", "AgentRunConfigError", "extract_recursive_result",
+    "register_recursive_direct",
     "CaptureNode", "CaptureConfigError",
     "HitlNode", "HitlAwaitNode", "HitlError", "LlmNode", "LlmError",
+    "LlmDeterministicError",
     "DecisionNode", "DecisionError", "register_decision_provider", "DECISION_PROVIDERS",
     "ReportNode", "append_entry", "read_entries",
     "NotifyNode", "NOTIFY_BACKENDS", "register_notify_backend", "get_notify_backend",

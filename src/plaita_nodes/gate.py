@@ -15,19 +15,22 @@ stdout/stderr 超阈值（4000 / 2000 字符）时做**头尾保留**并插入
 """
 from __future__ import annotations
 
-import os
 import shlex
-import signal
 import subprocess
-import time
 from typing import Any, ClassVar, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from plaita import Node
 
+from ._cancel import (
+    NodeCancelledError,
+    cancellation_requested,
+    communicate_cancellable,
+)
 from ._subprocess_env import build_subprocess_env, clip_output
 from ._tenant_guard import refuse_non_default_tenant
+from ._timeouts import is_deferred_expression, positive_seconds
 
 _STDOUT_CAP = 4000
 _STDERR_CAP = 2000
@@ -40,7 +43,9 @@ class GateNode(Node):
     - ``command``: shell 字符串或参数列表（元素支持 {% %} 表达式）
     - ``gate_name``: 门名称（用于报告）
     - ``cwd``: 工作目录
-    - ``timeout_secs``: 超时秒数（默认 600）
+    - ``timeout_secs``: 超时秒数（默认 600）。字面量 0/负值在构造期具名拒绝，
+      DSL 表达式串在求值后立即校验（A2R7-05，fail-closed）；0 不再被静默
+      吞成 600s
     - ``max_retries``: 失败自动重试次数（默认 0）；每次重试**重新执行命令**，
       ``retries`` 输出实际重试次数（0 = 首次即过/未重试）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时返回 passed=True
@@ -61,6 +66,16 @@ class GateNode(Node):
     max_retries: int = Field(default=0)
     dry_run: bool = False
 
+    @field_validator("timeout_secs", mode="before")
+    @classmethod
+    def _validate_timeout_secs(cls, value: Any) -> Any:
+        # 表达式串（含 $）构造期无法求值，留给 execute 求值后校验；
+        # 其余（字面量数字/数字串/None）立即 fail-closed（A2R7-05）。
+        if value is None or is_deferred_expression(value):
+            return value
+        positive_seconds("gate timeout_secs", value)
+        return value
+
     def execute(self, execution: Any) -> dict:
         if self.command is None:
             raise ValueError("gate 节点缺少 command")
@@ -72,7 +87,11 @@ class GateNode(Node):
         cwd = str(execution.evaluate(self.cwd) or "") if self.cwd else None
         # timeout_secs 经 DSL 传入时是表达式串（issue-pipeline v0.3 起 per-repo
         # 门预算走 INPUT），必须求值——与 git_publish.merge_mode 同一批坑。
-        timeout_secs = int(execution.evaluate(self.timeout_secs) or 600)
+        # 求值后立即 fail-closed 校验：0/负值不再被 ``or 600`` 吞成 10 分钟
+        # （A2R7-05）。
+        raw_timeout = execution.evaluate(self.timeout_secs)
+        timeout_secs = positive_seconds(
+            "gate timeout_secs", 600 if raw_timeout is None else raw_timeout)
         dry = self.dry_run or bool(execution.get_global_variable("dry_run", False))
         if dry:
             return {"passed": True, "gate": self.gate_name, "exit_code": 0,
@@ -86,21 +105,17 @@ class GateNode(Node):
         exit_code, stdout, stderr = 1, "", ""
         attempts = 1 + max(0, self.max_retries)
         for attempt in range(attempts):
+            # 重试环也消费取消信号：取消后不再重跑下一轮命令（A2R8-02）。
+            if cancellation_requested(execution):
+                raise NodeCancelledError(
+                    "gate cancelled via cancel_event; no further attempts")
             # 每轮重新 Popen——重试语义 = 重新执行命令。（历史 bug：Popen 在
             # 循环外，communicate 复用已退出进程，失败后从未真正重跑。）
             proc = subprocess.Popen(cmd, cwd=cwd or None, env=env, text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     start_new_session=True)
-            timed_out = False
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout_secs)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
-                stdout, stderr = proc.communicate()
+            stdout, stderr, timed_out = communicate_cancellable(
+                proc, timeout_secs, execution, "gate")
             exit_code = 124 if timed_out else (proc.returncode or 0)
             if exit_code == 0:
                 break

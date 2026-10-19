@@ -1,0 +1,8 @@
+[gate timeout_secs=0] ValidationError: Value error, gate timeout_secs must be a positive number of seconds (got 0); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=0, input_type=int]
+[gate timeout_secs=-1] ValidationError: Value error, gate timeout_secs must be a positive number of seconds (got -1); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=-1, input_type=int]
+[capture timeout_secs=0] ValidationError: Value error, capture timeout_secs must be a positive number of seconds (got 0); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=0, input_type=int]
+[capture timeout_secs=-1] ValidationError: Value error, capture timeout_secs must be a positive number of seconds (got -1); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=-1, input_type=int]
+[api timeout_ms=0] ValidationError: Value error, api_request timeout_ms must be a positive number of milliseconds (got 0); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=0, input_type=int]
+[api timeout_ms=-1] ValidationError: Value error, api_request timeout_ms must be a positive number of milliseconds (got -1); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=-1, input_type=int]
+[generic timeout_ms=0] ValidationError: Value error, generic_webhook timeout_ms must be a positive number of milliseconds (got 0); 0 and negative values are rejected (fail-closed) [type=value_error, input_value=0, input_type=int]
+[gate expr=$INPUT.t->0] ValueError: gate timeout_secs must be a positive number of seconds (got 0); 0 and negative values are rejected (fail-closed)

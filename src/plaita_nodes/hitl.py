@@ -20,6 +20,7 @@ from pydantic import Field
 
 from plaita import Node
 
+from ._cancel import cancellation_requested, wait_cancellable
 from ._hitl_client import (  # noqa: F401  (HitlError 再导出，保持既有导入路径)
     HitlError,
     resolve_base_url,
@@ -39,7 +40,9 @@ class HitlNode(Node):
     - ``poll_interval``: 轮询间隔秒（默认 5）
     - ``dry_run``: 为 true（或 globalContext.dry_run）时模拟一个「同意」回复
 
-    输出：``{"status": "replied"|"timeout", "replies": [str], "session_id", "dry_run"}``。
+    输出：``{"status": "replied"|"timeout"|"cancel", "replies": [str],
+    "session_id", "dry_run"}``。取消（``cancel_event``/``cancel_requested``）
+    在轮询循环内消费，不等满 ``poll_interval``（A2R8-03）。
     """
 
     node_type: ClassVar[str] = "hitl"
@@ -81,7 +84,15 @@ class HitlNode(Node):
         deadline = time.monotonic() + timeout_secs
         status, replies = "timeout", []
         while time.monotonic() < deadline:
-            poll = requests.get(f"{base}/api/poll/{session_id}", timeout=15).json()
+            # 引擎节点超时 / FlowExecution.cancel() 后立即停止轮询，而不是
+            # 继续 GET 到节点自身 deadline（默认 3600s，A2R8-03）。
+            if cancellation_requested(execution):
+                return {"status": "cancel", "replies": [], "session_id": session_id,
+                        "dry_run": False}
+            # 单次 GET 不超过剩余 deadline（A2R8-B7）；requests 要求 > 0。
+            poll_timeout = max(0.05, min(15.0, deadline - time.monotonic()))
+            poll = requests.get(f"{base}/api/poll/{session_id}",
+                                timeout=poll_timeout).json()
             if poll.get("has_reply"):
                 status = "replied"
                 replies = [
@@ -95,7 +106,10 @@ class HitlNode(Node):
             if poll_status == "timeout":
                 status = "timeout"
                 break
-            time.sleep(poll_interval)
+            # 可唤醒的等待：cancel_event 置位时不等满 poll_interval。
+            if wait_cancellable(execution, poll_interval):
+                return {"status": "cancel", "replies": [], "session_id": session_id,
+                        "dry_run": False}
 
         return {"status": status, "replies": replies, "session_id": session_id,
                 "dry_run": False}

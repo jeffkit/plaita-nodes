@@ -1,0 +1,244 @@
+FFFFFFFFFFFFFFFFF..                                                      [100%]
+=================================== FAILURES ===================================
+________________ test_gate_timeout_rejected_at_construction[0] _________________
+
+bad = 0
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_gate_timeout_rejected_at_construction[-1_0] _______________
+
+bad = -1
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_gate_timeout_rejected_at_construction[-0.5] _______________
+
+bad = -0.5
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_gate_timeout_rejected_at_construction[nan] ________________
+
+bad = nan
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_gate_timeout_rejected_at_construction[inf] ________________
+
+bad = inf
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_gate_timeout_rejected_at_construction[True] _______________
+
+bad = True
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_gate_timeout_rejected_at_construction[-1_1] _______________
+
+bad = '-1'
+
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, float("nan"), float("inf"), True, "-1"])
+    def test_gate_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:36: Failed
+_______________ test_capture_timeout_rejected_at_construction[0] _______________
+
+bad = 0
+
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_capture_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:43: Failed
+______________ test_capture_timeout_rejected_at_construction[-1] _______________
+
+bad = -1
+
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_capture_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:43: Failed
+_____________ test_capture_timeout_rejected_at_construction[True] ______________
+
+bad = True
+
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_capture_timeout_rejected_at_construction(bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:43: Failed
+__ test_api_timeout_ms_rejected_at_construction[0-ApiRequestNode-api_request] __
+
+node_cls = <class 'plaita_nodes.api.ApiRequestNode'>, name = 'api_request'
+bad = 0
+
+    @pytest.mark.parametrize("node_cls,name", [(ApiRequestNode, "api_request"),
+                                               (GenericWebhookNode, "generic_webhook")])
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_api_timeout_ms_rejected_at_construction(node_cls, name, bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:52: Failed
+_ test_api_timeout_ms_rejected_at_construction[0-GenericWebhookNode-generic_webhook] _
+
+node_cls = <class 'plaita_nodes.api.GenericWebhookNode'>
+name = 'generic_webhook', bad = 0
+
+    @pytest.mark.parametrize("node_cls,name", [(ApiRequestNode, "api_request"),
+                                               (GenericWebhookNode, "generic_webhook")])
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_api_timeout_ms_rejected_at_construction(node_cls, name, bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:52: Failed
+_ test_api_timeout_ms_rejected_at_construction[-1-ApiRequestNode-api_request] __
+
+node_cls = <class 'plaita_nodes.api.ApiRequestNode'>, name = 'api_request'
+bad = -1
+
+    @pytest.mark.parametrize("node_cls,name", [(ApiRequestNode, "api_request"),
+                                               (GenericWebhookNode, "generic_webhook")])
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_api_timeout_ms_rejected_at_construction(node_cls, name, bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:52: Failed
+_ test_api_timeout_ms_rejected_at_construction[-1-GenericWebhookNode-generic_webhook] _
+
+node_cls = <class 'plaita_nodes.api.GenericWebhookNode'>
+name = 'generic_webhook', bad = -1
+
+    @pytest.mark.parametrize("node_cls,name", [(ApiRequestNode, "api_request"),
+                                               (GenericWebhookNode, "generic_webhook")])
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_api_timeout_ms_rejected_at_construction(node_cls, name, bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:52: Failed
+_ test_api_timeout_ms_rejected_at_construction[True-ApiRequestNode-api_request] _
+
+node_cls = <class 'plaita_nodes.api.ApiRequestNode'>, name = 'api_request'
+bad = True
+
+    @pytest.mark.parametrize("node_cls,name", [(ApiRequestNode, "api_request"),
+                                               (GenericWebhookNode, "generic_webhook")])
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_api_timeout_ms_rejected_at_construction(node_cls, name, bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:52: Failed
+_ test_api_timeout_ms_rejected_at_construction[True-GenericWebhookNode-generic_webhook] _
+
+node_cls = <class 'plaita_nodes.api.GenericWebhookNode'>
+name = 'generic_webhook', bad = True
+
+    @pytest.mark.parametrize("node_cls,name", [(ApiRequestNode, "api_request"),
+                                               (GenericWebhookNode, "generic_webhook")])
+    @pytest.mark.parametrize("bad", [0, -1, True])
+    def test_api_timeout_ms_rejected_at_construction(node_cls, name, bad):
+>       with pytest.raises(ValueError) as caught:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE <class 'ValueError'>
+
+tests/test_a2r7_timeout_matrix.py:52: Failed
+_________ test_gate_expression_is_deferred_and_validated_before_spawn __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x110a9ea30>
+
+    def test_gate_expression_is_deferred_and_validated_before_spawn(monkeypatch):
+        node = GateNode(id="g", command=["true"],
+                        timeout_secs="$INPUT.gate_timeout_secs")
+    
+        def boom(*args, **kwargs):
+            raise AssertionError("timeout 校验失败时不得 spawn 子进程")
+    
+        monkeypatch.setattr("plaita_nodes.gate.subprocess.Popen", boom)
+        with pytest.raises(ValueError) as caught:
+>           node.execute(_Exec({"$INPUT.gate_timeout_secs": 0}))
+
+tests/test_a2r7_timeout_matrix.py:66: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/plaita_nodes/gate.py:114: in execute
+    proc = subprocess.Popen(cmd, cwd=cwd or None, env=env, text=True,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+args = (['true'],)
+kwargs = {'cwd': None, 'env': {'HOME': '/Users/kong', 'LANG': 'en_US.UTF-8', 'LC_CTYPE': 'en_US.UTF-8', 'PATH': '/Users/kong/.g...ls/ripgrep:/Applications/ZCode.app/Contents/Resources/tools/ugrep', ...}, 'start_new_session': True, 'stderr': -1, ...}
+
+    def boom(*args, **kwargs):
+>       raise AssertionError("timeout 校验失败时不得 spawn 子进程")
+E       AssertionError: timeout 校验失败时不得 spawn 子进程
+
+tests/test_a2r7_timeout_matrix.py:62: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[0]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[-1_0]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[-0.5]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[nan]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[inf]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[True]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_timeout_rejected_at_construction[-1_1]
+FAILED tests/test_a2r7_timeout_matrix.py::test_capture_timeout_rejected_at_construction[0]
+FAILED tests/test_a2r7_timeout_matrix.py::test_capture_timeout_rejected_at_construction[-1]
+FAILED tests/test_a2r7_timeout_matrix.py::test_capture_timeout_rejected_at_construction[True]
+FAILED tests/test_a2r7_timeout_matrix.py::test_api_timeout_ms_rejected_at_construction[0-ApiRequestNode-api_request]
+FAILED tests/test_a2r7_timeout_matrix.py::test_api_timeout_ms_rejected_at_construction[0-GenericWebhookNode-generic_webhook]
+FAILED tests/test_a2r7_timeout_matrix.py::test_api_timeout_ms_rejected_at_construction[-1-ApiRequestNode-api_request]
+FAILED tests/test_a2r7_timeout_matrix.py::test_api_timeout_ms_rejected_at_construction[-1-GenericWebhookNode-generic_webhook]
+FAILED tests/test_a2r7_timeout_matrix.py::test_api_timeout_ms_rejected_at_construction[True-ApiRequestNode-api_request]
+FAILED tests/test_a2r7_timeout_matrix.py::test_api_timeout_ms_rejected_at_construction[True-GenericWebhookNode-generic_webhook]
+FAILED tests/test_a2r7_timeout_matrix.py::test_gate_expression_is_deferred_and_validated_before_spawn
+17 failed, 2 passed in 0.36s

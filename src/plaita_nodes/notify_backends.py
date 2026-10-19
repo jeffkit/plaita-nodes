@@ -24,6 +24,9 @@ import requests
 
 from plaita.credentials import get_credential
 
+from ._redact import _scrub_exception_text, _scrub_url_text
+from ._retry import DeterministicRuntimeError, is_retryable_http_status
+
 NotifyBackend = Callable[[Any, Any, str], dict]
 
 NOTIFY_BACKENDS: Dict[str, NotifyBackend] = {}
@@ -62,14 +65,27 @@ def _credential_url(node: Any) -> str:
 
 
 def _post_json(url: str, payload: Dict[str, Any]) -> dict:
-    resp = requests.post(url, json=payload, timeout=15)
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        # requests 的 ConnectionError/Timeout 文本带完整 URL path/query：
+        # Feishu/Slack 的机器人 token 在 path，DingTalk 的 access_token 在
+        # query。清洗成 ``scheme://host`` 后再抛出，绝不让 token 进
+        # NodeExecutionError → state.error / worker 日志（A2R8-01）。
+        raise RuntimeError(_scrub_exception_text(exc)) from None
     ok = resp.status_code == 200
     try:
         body: Any = resp.json()
     except ValueError:
         body = resp.text[:200]
     if not ok:
-        raise RuntimeError(f"webhook 调用失败 HTTP {resp.status_code}: {body}")
+        detail = _scrub_url_text(
+            f"webhook 调用失败 HTTP {resp.status_code}: {body}")
+        # 4xx（408/425/429 除外）是请求本身的确定性错误——不被 retryTimes
+        # 放大成重复群消息；5xx/限流保持可重试（A2R7-04）。
+        if is_retryable_http_status(resp.status_code):
+            raise RuntimeError(detail)
+        raise DeterministicRuntimeError(detail)
     return {"status": resp.status_code, "response": body}
 
 

@@ -40,12 +40,22 @@ from pydantic import Field
 
 from plaita import Node
 
+from ._retry import DeterministicError
 from ._subprocess_env import build_subprocess_env
 from .config import EXECUTOR_ALIASES, resolve_agent
 
 
 class AgentRunError(RuntimeError):
     pass
+
+
+class AgentRunConfigError(AgentRunError, DeterministicError):
+    """确定性配置/安全拒绝——不被 ``retryTimes`` 重试（A2R7-04）。
+
+    覆盖：多租户直跑拒绝、执行器未接入、沙箱/凭据注册缺失、workspace 空值
+    等「同参数重跑必然同样失败」的错误。Agent 自身非零退出 / ``is_error``
+    仍按瞬态 ``AgentRunError`` 保留重试。
+    """
 
 
 def _ap_exit_cancelled() -> int:
@@ -378,7 +388,7 @@ class AgentRunNode(Node):
         """构建期互斥校验（由 FlowBuilder.validate 调用；JSON 直载路径是 warning
         降级，运行期另有硬守卫）。"""
         if self.workspace is not None and self.repo is not None:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 "workspace 与 repo 互斥：workspace=沙箱执行，repo=宿主直跑路径，二选一")
 
     def execute(self, execution: Any) -> dict:
@@ -399,13 +409,13 @@ class AgentRunNode(Node):
         # dry 下不解析注册表、不解析凭据、零 driver 调用。
         if self.workspace is not None:
             if repo:
-                raise AgentRunError(
+                raise AgentRunConfigError(
                     "workspace 与 repo 互斥：workspace=沙箱执行，repo=宿主直跑路径，二选一")
             return self._execute_sandboxed(execution, agent_name, str(prompt))
 
         denied_tenant = _host_run_denied()
         if denied_tenant:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 f"多租户（tenant={denied_tenant}）不允许 agent 宿主直跑：节点声明 "
                 f"workspace 走沙箱执行（VM 边界 + 密钥只经 envfile 进容器）；"
                 f"单机信任部署可显式设 {HOST_RUN_OPT_OUT_ENV}=1 放行")
@@ -431,7 +441,7 @@ class AgentRunNode(Node):
         # 显式别名映射优先；否则若 agentproc 已内置同名 executor（或测试桩）直接使用
         ap_executor = EXECUTOR_ALIASES.get(executor, executor)
         if ap_executor not in AP_EXECUTORS:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 f"执行器 '{executor}' 未接入（agentproc 可用：{sorted(AP_EXECUTORS)}）；"
                 f"如需其他 CLI 请在 agentproc executor 层扩展或加 EXECUTOR_ALIASES 映射"
             )
@@ -557,11 +567,11 @@ class AgentRunNode(Node):
             try:
                 bundle = get_credential(str(value["credential"]))
             except CredentialError as exc:
-                raise AgentRunError(f"沙箱凭据解析失败：{exc}") from exc
+                raise AgentRunConfigError(f"沙箱凭据解析失败：{exc}") from exc
             field_name = str(value.get("field") or "token")
             resolved = bundle.get(field_name)
             if resolved is None:
-                raise AgentRunError(
+                raise AgentRunConfigError(
                     f"凭据 '{value['credential']}' 缺少字段 {field_name}")
             return str(resolved)
         return str(value)
@@ -579,16 +589,17 @@ class AgentRunNode(Node):
         ws_key = execution.evaluate(self.workspace)
         ws_key = "" if ws_key is None else str(ws_key).strip()
         if not ws_key:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 "workspace 求值为空——拒绝执行（$INPUT 缺键会静默 None，"
                 "空名会让所有迭代共享同一沙箱，设计 §4 None 静默守卫）")
         execution_id = str(getattr(execution, "execution_id", "") or "")
         if not execution_id:
-            raise AgentRunError("execution 缺少 execution_id，无法派生 workspace handle")
+            raise AgentRunConfigError(
+                "execution 缺少 execution_id，无法派生 workspace handle")
 
         spec = sb.load_sandboxes().get(ws_key)
         if spec is None:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 f"workspace '{ws_key}' 未注册（fail-closed，运行期不自动创建）："
                 f"请在 .plaita/sandboxes.json 定义后按名引用")
         # provision.git.branch 允许 flow 表达式（首个引用节点求值；须确定性，设计 §4）
@@ -598,7 +609,7 @@ class AgentRunNode(Node):
 
         driver = sb.get_driver(spec.driver)
         if driver is None:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 f"沙箱 driver '{spec.driver}' 未注册（可用：{sorted(sb.SANDBOX_DRIVERS)}）")
 
         profile = resolve_agent(agent_name, repo=None)
@@ -608,7 +619,7 @@ class AgentRunNode(Node):
 
         ap_executor = EXECUTOR_ALIASES.get(executor, executor)
         if ap_executor not in AP_EXECUTORS:
-            raise AgentRunError(
+            raise AgentRunConfigError(
                 f"执行器 '{executor}' 未接入（agentproc 可用：{sorted(AP_EXECUTORS)}）；"
                 f"如需其他 CLI 请在 agentproc executor 层扩展或加 EXECUTOR_ALIASES 映射"
             )

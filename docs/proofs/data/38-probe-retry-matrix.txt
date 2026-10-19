@@ -1,0 +1,6 @@
+[capture-config-error] executions=1 outcome=RAISED NodeExecutionError: 执行节点_n1出错了: CaptureConfigError: capture 节点缺少 command 字段 (源码第 4 行)
+[sql-valueerror] executions=1 outcome=RAISED NodeExecutionError: 执行节点_n1出错了: ValueError: 缺少 credential 字段：请填凭据名（编排台「凭据」页创建） (源码第 4 行)
+[sql-result-limit] executions=1 outcome=RAISED NodeExecutionError: 执行节点_n1出错了: SqlResultLimitError: sql_query 结果超过上限（max_rows=1, max_bytes=4194304）：已读取 2 行 / 16 字节；拒绝返回部分结果（不静默截
+[agentrun-tenant-denied] executions=1 outcome=RAISED NodeExecutionError: 执行节点_n1出错了: AgentRunConfigError: 多租户（tenant=tenant-a）不允许 agent 宿主直跑：节点声明 workspace 走沙箱执行（VM 边界 + 密钥只经 envfile 
+[agentrun-bad-executor] executions=1 outcome=RAISED NodeExecutionError: 执行节点_n1出错了: AgentRunConfigError: 执行器 'nope' 未接入（agentproc 可用：['agy', 'aider', 'claude-code', 'codebuddy', 'cod
+[api-401] requests=1 outcome=RAISED NodeExecutionError: 执行节点_n1出错了: DeterministicRuntimeError: API 请求失败 HTTP 401: {'error': 'unauthorized'} (源码第 4 行)
