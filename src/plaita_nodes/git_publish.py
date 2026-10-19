@@ -33,7 +33,7 @@ from typing import Any, ClassVar, Optional
 
 from plaita import Node
 
-from ._git_env import build_git_env
+from ._git_env import build_git_env, git_hardened_argv
 
 
 class GitPublishNode(Node):
@@ -88,20 +88,22 @@ class GitPublishNode(Node):
         if merge_mode == "main" and self.main_clone is None:
             raise ValueError("git_publish merge_mode=main 需要 main_clone 字段")
 
-        # 工作树内 hook / clean filter 会在 add/commit 时执行；env 按 git 最小集
-        # 重建，宿主凭据（PLAITA_CREDENTIALS_KEY 等）不进被触发的钩子（pn#17）。
+        # 工作树是 agent 可写面：hook / clean filter / fsmonitor 一律零执行
+        # （core.hooksPath=/dev/null + filter.* 空覆盖，pn#21）；env 仍按 git
+        # 最小集重建，宿主凭据（PLAITA_CREDENTIALS_KEY 等）不进子进程（pn#17）。
         env = build_git_env()
+        git_argv = git_hardened_argv(wt, env=env, timeout=60)
 
         def sh(args, cwd=None, t=None):
-            return subprocess.run(args, cwd=cwd or wt, capture_output=True, text=True,
-                                  timeout=t or self.timeout_secs, env=env)
+            return subprocess.run([*git_argv, *args], cwd=cwd or wt, capture_output=True,
+                                  text=True, timeout=t or self.timeout_secs, env=env)
 
-        dirty = sh(["git", "status", "--porcelain"]).stdout.strip() != ""
+        dirty = sh(["status", "--porcelain"]).stdout.strip() != ""
         committed_now = False
         msg = self._resolve_message(execution) if (dirty or merge_mode == "pr") else None
         if dirty:
-            sh(["git", "add", "-A"])
-            rc = sh(["git", "commit", "-m", msg])
+            sh(["add", "-A"])
+            rc = sh(["commit", "-m", msg])
             if rc.returncode != 0:
                 return {"pushed": False, "merged": None, "push_note": "",
                         "note": f"commit 失败: {(rc.stderr or '')[-300:]}",
@@ -113,11 +115,11 @@ class GitPublishNode(Node):
                     "note": f"none 模式：改动已 commit 到本地分支 {branch}，未推送"}
 
         remote_head = self._remote_head(sh, branch)
-        head = sh(["git", "rev-parse", "HEAD"]).stdout.strip()
+        head = sh(["rev-parse", "HEAD"]).stdout.strip()
         if remote_head and remote_head == head and not committed_now:
             pushed, push_note = True, "远端已同步，跳过重复 push"
         else:
-            args = ["git", "push", "-u", "origin", branch] if not remote_head else ["git", "push", "origin", branch]
+            args = ["push", "-u", "origin", branch] if not remote_head else ["push", "origin", branch]
             rp = sh(args)
             pushed = rp.returncode == 0
             push_note = "" if pushed else (rp.stderr or "")[-300:]
@@ -161,26 +163,28 @@ class GitPublishNode(Node):
         raise ValueError("git_publish：无 commit_message/plan_file/issue_number，无法确定提交消息")
 
     def _remote_head(self, sh, branch: str) -> Optional[str]:
-        lr = sh(["git", "ls-remote", "--heads", "origin", branch], t=60)
+        lr = sh(["ls-remote", "--heads", "origin", branch], t=60)
         out = lr.stdout.strip()
         return out.split("\t")[0] if out else None
 
     def _merge_to_main(self, main_clone: str, branch: str, base_branch: str = "main",
                        env=None) -> dict:
-        # env 缺省也不能回退宿主全量环境（防未来调用方漏传）。
+        # env 缺省也不能回退宿主全量环境（防未来调用方漏传）；merge/fetch 同样
+        # 不执行 main_clone 的 hooks/filters（分支内容可能来自不可信工作树）。
         env = build_git_env() if env is None else env
+        git_argv = git_hardened_argv(main_clone, env=env, timeout=60)
 
         def sh(args, t=None):
-            return subprocess.run(args, cwd=main_clone, capture_output=True, text=True,
-                                  timeout=t or self.timeout_secs, env=env)
+            return subprocess.run([*git_argv, *args], cwd=main_clone, capture_output=True,
+                                  text=True, timeout=t or self.timeout_secs, env=env)
 
-        sh(["git", "fetch", "origin"])
-        r1 = sh(["git", "merge", "--ff-only", f"origin/{branch}"])
+        sh(["fetch", "origin"])
+        r1 = sh(["merge", "--ff-only", f"origin/{branch}"])
         if r1.returncode != 0:
-            sh(["git", "merge", "--abort"])
+            sh(["merge", "--abort"])
             return {"merged": False,
                     "note": f"ff 合并失败（{base_branch} 已前进或分支未推送），分支在远端，请人工合并"}
-        r2 = sh(["git", "push", "origin", f"HEAD:{base_branch}"])
+        r2 = sh(["push", "origin", f"HEAD:{base_branch}"])
         if r2.returncode == 0:
             return {"merged": True, "note": f"已 ff 合并推送 {base_branch}"}
         return {"merged": False, "note": f"合并成功但推送 {base_branch} 失败"}

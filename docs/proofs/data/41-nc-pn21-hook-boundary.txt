@@ -1,0 +1,98 @@
+FFFFFFFFF..FF..F..                                                       [100%]
+=================================== FAILURES ===================================
+_ TestHardenedGitArgv.test_hooks_fsmonitor_ext_and_configured_filters_all_disabled _
+tests/test_issue21_git_hook_boundary.py:141: in test_hooks_fsmonitor_ext_and_configured_filters_all_disabled
+    argv = mod.git_hardened_argv(str(local_repo), env=mod.build_git_env())
+           ^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'plaita_nodes._git_env' has no attribute 'git_hardened_argv'
+________ TestMaliciousHooksZeroExecution.test_pre_commit_zero_execution ________
+tests/test_issue21_git_hook_boundary.py:169: in test_pre_commit_zero_execution
+    _fail_if_probe(probe, "恶意 pre-commit ")
+tests/test_issue21_git_hook_boundary.py:126: in _fail_if_probe
+    pytest.fail(
+E   Failed: 恶意 pre-commit 被执行（pn#21 应为零执行）；探针输出：
+E   hook=pre-commit
+E   SSH_AUTH_SOCK=/tmp/pn21-fake-agent.sock
+E   GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no
+E   Error connecting to agent: No such file or directory
+_________ TestMaliciousHooksZeroExecution.test_pre_push_zero_execution _________
+tests/test_issue21_git_hook_boundary.py:185: in test_pre_push_zero_execution
+    _fail_if_probe(probe, "恶意 pre-push ")
+tests/test_issue21_git_hook_boundary.py:126: in _fail_if_probe
+    pytest.fail(
+E   Failed: 恶意 pre-push 被执行（pn#21 应为零执行）；探针输出：
+E   hook=pre-push
+E   SSH_AUTH_SOCK=/tmp/pn21-fake-agent.sock
+E   GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no
+E   Error connecting to agent: No such file or directory
+_______ TestMaliciousHooksZeroExecution.test_clean_filter_zero_execution _______
+tests/test_issue21_git_hook_boundary.py:201: in test_clean_filter_zero_execution
+    assert not marker.exists(), "worktree 的 clean filter 在发布时被执行"
+E   AssertionError: worktree 的 clean filter 在发布时被执行
+E   assert not True
+E    +  where True = exists()
+E    +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4007/test_clean_filter_zero_executi0/clean-filter-ran').exists
+_ TestMaliciousHooksZeroExecution.test_clean_filter_with_dotted_driver_name_disabled _
+tests/test_issue21_git_hook_boundary.py:218: in test_clean_filter_with_dotted_driver_name_disabled
+    assert not marker.exists(), "带点 driver 名的 clean filter 在发布时被执行"
+E   AssertionError: 带点 driver 名的 clean filter 在发布时被执行
+E   assert not True
+E    +  where True = exists()
+E    +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4007/test_clean_filter_with_dotted_0/dotted-filter-ran').exists
+______ TestMaliciousHooksZeroExecution.test_fsmonitor_hook_zero_execution ______
+tests/test_issue21_git_hook_boundary.py:234: in test_fsmonitor_hook_zero_execution
+    assert not marker.exists(), "core.fsmonitor（等价 hook）在发布时被执行"
+E   AssertionError: core.fsmonitor（等价 hook）在发布时被执行
+E   assert not True
+E    +  where True = exists()
+E    +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4007/test_fsmonitor_hook_zero_execu0/fsmonitor-ran').exists
+_______________________ test_hook_cannot_reach_ssh_agent _______________________
+tests/test_issue21_git_hook_boundary.py:282: in test_hook_cannot_reach_ssh_agent
+    _fail_if_probe(probe, "恶意 hook ")
+tests/test_issue21_git_hook_boundary.py:126: in _fail_if_probe
+    pytest.fail(
+E   Failed: 恶意 hook 被执行（pn#21 应为零执行）；探针输出：
+E   hook=agent
+E   SSH_AUTH_SOCK=/tmp/pn21-agent-8hu2u8z4/agent.sock
+E   256 SHA256:+U3WVQR9hgFBZh94jkjeAKh7vrQmJTUqRNY4r7+mtiU kong@MacBookPro (ED25519)
+____ TestValueLevelCredentialScan.test_git_ssh_command_with_token_rejected _____
+tests/test_issue21_git_hook_boundary.py:304: in test_git_ssh_command_with_token_rejected
+    with pytest.raises(mod.GitEnvCredentialError) as excinfo:
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'plaita_nodes._git_env' has no attribute 'GitEnvCredentialError'
+__________ TestValueLevelCredentialScan.test_proxy_userinfo_rejected ___________
+tests/test_issue21_git_hook_boundary.py:315: in test_proxy_userinfo_rejected
+    with pytest.raises(mod.GitEnvCredentialError, match="HTTPS_PROXY"):
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'plaita_nodes._git_env' has no attribute 'GitEnvCredentialError'
+___________ TestValueLevelCredentialScan.test_ssh_auth_sock_dropped ____________
+tests/test_issue21_git_hook_boundary.py:335: in test_ssh_auth_sock_dropped
+    assert "SSH_AUTH_SOCK" not in mod.build_git_env()
+E   AssertionError: assert 'SSH_AUTH_SOCK' not in {'GIT_EDITOR': 'true', 'HOME': '/Users/kong', 'LANG': 'en_US.UTF-8', 'LC_CTYPE': 'en_US.UTF-8', ...}
+E    +  where {'GIT_EDITOR': 'true', 'HOME': '/Users/kong', 'LANG': 'en_US.UTF-8', 'LC_CTYPE': 'en_US.UTF-8', ...} = <function build_git_env at 0x10576b2e0>()
+E    +    where <function build_git_env at 0x10576b2e0> = <module 'plaita_nodes._git_env' from '/Users/kong/projects/infra4agent/plaita-nodes/src/plaita_nodes/_git_env.py'>.build_git_env
+___ TestBuildGitEnv.test_credentials_and_ssh_agent_dropped_git_identity_kept ___
+tests/test_issue17_subprocess_env_whitelist.py:78: in test_credentials_and_ssh_agent_dropped_git_identity_kept
+    assert "SSH_AUTH_SOCK" not in env
+E   AssertionError: assert 'SSH_AUTH_SOCK' not in {'GH_CONFIG_DIR': '/tmp/gh-config', 'GIT_AUTHOR_NAME': 'hook-author', 'GIT_EDITOR': 'true', 'GIT_SSH_COMMAND': 'ssh -o StrictHostKeyChecking=no', ...}
+_ TestGitPublishHookBoundary.test_git_hook_does_not_run_in_untrusted_worktree __
+tests/test_issue17_subprocess_env_whitelist.py:157: in test_git_hook_does_not_run_in_untrusted_worktree
+    assert not probe.exists(), "pn#21：pre-commit 在不可信工作树中必须零执行"
+E   AssertionError: pn#21：pre-commit 在不可信工作树中必须零执行
+E   assert not True
+E    +  where True = exists()
+E    +    where exists = PosixPath('/private/var/folders/t9/j35q71px7_v707gs5my6jgbr0000gn/T/pytest-of-kong/pytest-4007/test_git_hook_does_not_run_in_0/hook-env.txt').exists
+=========================== short test summary info ============================
+FAILED tests/test_issue21_git_hook_boundary.py::TestHardenedGitArgv::test_hooks_fsmonitor_ext_and_configured_filters_all_disabled
+FAILED tests/test_issue21_git_hook_boundary.py::TestMaliciousHooksZeroExecution::test_pre_commit_zero_execution
+FAILED tests/test_issue21_git_hook_boundary.py::TestMaliciousHooksZeroExecution::test_pre_push_zero_execution
+FAILED tests/test_issue21_git_hook_boundary.py::TestMaliciousHooksZeroExecution::test_clean_filter_zero_execution
+FAILED tests/test_issue21_git_hook_boundary.py::TestMaliciousHooksZeroExecution::test_clean_filter_with_dotted_driver_name_disabled
+FAILED tests/test_issue21_git_hook_boundary.py::TestMaliciousHooksZeroExecution::test_fsmonitor_hook_zero_execution
+FAILED tests/test_issue21_git_hook_boundary.py::test_hook_cannot_reach_ssh_agent
+FAILED tests/test_issue21_git_hook_boundary.py::TestValueLevelCredentialScan::test_git_ssh_command_with_token_rejected
+FAILED tests/test_issue21_git_hook_boundary.py::TestValueLevelCredentialScan::test_proxy_userinfo_rejected
+FAILED tests/test_issue21_git_hook_boundary.py::TestValueLevelCredentialScan::test_ssh_auth_sock_dropped
+FAILED tests/test_issue17_subprocess_env_whitelist.py::TestBuildGitEnv::test_credentials_and_ssh_agent_dropped_git_identity_kept
+FAILED tests/test_issue17_subprocess_env_whitelist.py::TestGitPublishHookBoundary::test_git_hook_does_not_run_in_untrusted_worktree
+12 failed, 6 passed in 4.16s

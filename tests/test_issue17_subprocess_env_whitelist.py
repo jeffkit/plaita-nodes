@@ -5,14 +5,19 @@
 标准行为——提示注入让钩子打印 ``PLAITA_CREDENTIALS_KEY`` 即可外带平台凭据。
 
 契约：
-- 子进程 env 从白名单重建（PATH/HOME/GIT_* 最小集 + ssh-agent/gh 配置定位）；
+- 子进程 env 从白名单重建（PATH/HOME/GIT_* 最小集 + gh 配置定位）；
 - 凭据类变量（``*TOKEN*`` / ``*SECRET*`` / ``*PASSWORD*`` / ``*CREDENTIAL*``
   等）一律不传；
+- ``SSH_AUTH_SOCK`` 自 pn#21 起同样不传（agent 身份是凭据，同 UID 的
+  hook 不能用它 ``ssh-add -l``）；需要 ssh 凭据的部署改显式 key /
+  credential helper；
 - 正常 publish/comment 照常工作（正控）。
 
-负控（回退生产改动）时，``test_git_hook_does_not_see_host_credentials`` 与
-``test_gh_child_does_not_see_host_credentials`` 精确红：钩子/gh 能看到
-``PLAITA_CREDENTIALS_KEY=host-secret-...``。
+负控（回退生产改动）时，``test_git_hook_does_not_run_in_untrusted_worktree``
+与 ``test_gh_child_does_not_see_host_credentials`` 精确红：回退 #21 边界后
+钩子被执行并看到 ``PLAITA_CREDENTIALS_KEY=host-secret-...``。pn#21 起 git 子进程
+的 hook/filter 在不可信工作树中零执行（见 test_issue21_git_hook_boundary.py），
+本文件保留「零执行」契约与 gh 子进程的 env 白名单正控。
 """
 from __future__ import annotations
 
@@ -55,7 +60,8 @@ def host_secrets(monkeypatch):
 
 
 class TestBuildGitEnv:
-    def test_credentials_dropped_git_and_ssh_kept(self, monkeypatch, host_secrets):
+    def test_credentials_and_ssh_agent_dropped_git_identity_kept(
+            self, monkeypatch, host_secrets):
         monkeypatch.setenv("GIT_AUTHOR_NAME", "hook-author")
         monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no")
         monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
@@ -68,7 +74,8 @@ class TestBuildGitEnv:
         assert env["PATH"] == "/usr/bin:/bin"
         assert env["GIT_AUTHOR_NAME"] == "hook-author"
         assert env["GIT_SSH_COMMAND"].startswith("ssh ")
-        assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+        # pn#21：agent 身份仍是凭据——不再随 git 子进程走
+        assert "SSH_AUTH_SOCK" not in env
         assert env["GH_CONFIG_DIR"] == "/tmp/gh-config"
 
     def test_credential_bearing_git_vars_dropped(self, monkeypatch, host_secrets):
@@ -128,13 +135,14 @@ def _install_probe_hook(repo: Path, out_file: Path) -> None:
     hook.chmod(0o755)
 
 
-class TestGitPublishHookEnv:
-    def test_git_hook_does_not_see_host_credentials(
+class TestGitPublishHookBoundary:
+    def test_git_hook_does_not_run_in_untrusted_worktree(
             self, git_repo, tmp_path, host_secrets, monkeypatch):
+        """pn#21：agent 可写工作树的 hook 零执行——凭据面整体消失。"""
         probe = tmp_path / "hook-env.txt"
         _install_probe_hook(git_repo, probe)
-        monkeypatch.setenv("GIT_MERGE_AUTOEDIT", "no")  # 非敏感 GIT_* 应放行
-        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")  # 凭据面应剔除
+        monkeypatch.setenv("GIT_MERGE_AUTOEDIT", "no")  # 非敏感 GIT_* 仍放行
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")  # 凭据面仍剔除
         monkeypatch.setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer host-secret")
         (git_repo / "b.txt").write_text("change", encoding="utf-8")
@@ -146,23 +154,12 @@ class TestGitPublishHookEnv:
         # 正控：正常 commit 成功（none 模式不 push）
         assert out["pushed"] is False and "未推送" in out["note"]
         assert "commit 失败" not in out["note"]
-        assert probe.exists(), "pre-commit 应被 git 正常执行"
+        assert not probe.exists(), "pn#21：pre-commit 在不可信工作树中必须零执行"
+        assert _git("log", "-1", "--pretty=%s", cwd=git_repo) == "test: hook probe"
 
-        child_env = probe.read_text(encoding="utf-8", errors="replace")
-        assert "PATH=" in child_env
-        assert "GIT_MERGE_AUTOEDIT=no" in child_env  # 非敏感 GIT_* 最小集放行
-        for key, value in host_secrets.items():
-            assert f"{key}=" not in child_env, f"{key} 泄漏进 git 钩子"
-            assert value not in child_env
-        assert "GIT_CONFIG_COUNT" not in child_env
-        assert "GIT_CONFIG_KEY_0" not in child_env
-        assert "Authorization: Bearer" not in child_env
-
-    def test_git_hook_sees_git_author_env(self, git_repo, tmp_path, host_secrets,
-                                          monkeypatch):
+    def test_git_author_env_still_used_for_commit(self, git_repo, host_secrets,
+                                                  monkeypatch):
         """git 身份经 env 传入仍生效（GIT_* 最小集不是一刀切）。"""
-        probe = tmp_path / "hook-env.txt"
-        _install_probe_hook(git_repo, probe)
         monkeypatch.setenv("GIT_AUTHOR_NAME", "Hook Author")
         (git_repo / "b.txt").write_text("change", encoding="utf-8")
 
@@ -172,7 +169,6 @@ class TestGitPublishHookEnv:
         ).execute(_FakeExec())
 
         assert "commit 失败" not in out["note"]
-        assert "GIT_AUTHOR_NAME=Hook Author" in probe.read_text(encoding="utf-8")
         assert _git("log", "-1", "--pretty=%an", cwd=git_repo) == "Hook Author"
 
 
