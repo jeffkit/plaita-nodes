@@ -21,6 +21,8 @@ from typing import Any, ClassVar, List, Optional, Tuple
 
 from plaita import Node
 
+from ._git_env import build_git_env
+
 # 消毒规则（issue-pipeline 生产验证过的清单；\1 反向引用保留命令原文）
 _REDACT_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"/Users/\S+"), "[REDACTED-PATH]"),
@@ -90,6 +92,10 @@ class GithubCommentNode(Node):
         if self.dedup_marker and self._already_commented(repo, number, self.dedup_marker):
             return {"posted": False, "note": "已有含去重标记的评论（断点续跑），跳过"}
 
+        # gh 与 git 共用最小 env：宿主凭据（GH_TOKEN / PLAITA_CREDENTIALS_KEY
+        # 等）不进子进程（pn#17）；token 档部署改走 gh auth 落盘配置。
+        env = build_git_env()
+
         body = self._finalize(body, artifact_dir)
         if self.footer is not None:
             tail = str(execution.evaluate(self.footer) or "")
@@ -99,7 +105,8 @@ class GithubCommentNode(Node):
 
         cmd = ["gh", "issue", "comment", str(number), "-R", repo, "--body-file", body_path]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_secs)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=self.timeout_secs, env=env)
         except FileNotFoundError as exc:
             raise RuntimeError(f"github_comment：gh 不可用（{exc}）；请确认 PATH 含 gh CLI") from None
         if r.returncode != 0:
@@ -118,6 +125,7 @@ class GithubCommentNode(Node):
             ["gh", "issue", "view", str(number), "-R", repo, "--json", "comments",
              "--jq", f'.comments | map(select(.body | contains("{marker}"))) | length'],
             capture_output=True, text=True, timeout=self.timeout_secs,
+            env=build_git_env(),
         )
         return chk.returncode == 0 and chk.stdout.strip() not in ("", "0")
 

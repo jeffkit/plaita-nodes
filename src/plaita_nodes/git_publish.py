@@ -33,6 +33,8 @@ from typing import Any, ClassVar, Optional
 
 from plaita import Node
 
+from ._git_env import build_git_env
+
 
 class GitPublishNode(Node):
     """commit + push（幂等），可选 ff 合并 main。
@@ -86,9 +88,13 @@ class GitPublishNode(Node):
         if merge_mode == "main" and self.main_clone is None:
             raise ValueError("git_publish merge_mode=main 需要 main_clone 字段")
 
+        # 工作树内 hook / clean filter 会在 add/commit 时执行；env 按 git 最小集
+        # 重建，宿主凭据（PLAITA_CREDENTIALS_KEY 等）不进被触发的钩子（pn#17）。
+        env = build_git_env()
+
         def sh(args, cwd=None, t=None):
             return subprocess.run(args, cwd=cwd or wt, capture_output=True, text=True,
-                                  timeout=t or self.timeout_secs)
+                                  timeout=t or self.timeout_secs, env=env)
 
         dirty = sh(["git", "status", "--porcelain"]).stdout.strip() != ""
         committed_now = False
@@ -120,7 +126,7 @@ class GitPublishNode(Node):
             if not pushed:
                 return {"pushed": False, "merged": False, "push_note": push_note,
                         "note": f"分支推送失败，未开 PR：{push_note}"}
-            return {**self._create_pr(wt, branch, base_branch, msg), "pushed": True,
+            return {**self._create_pr(wt, branch, base_branch, msg, env=env), "pushed": True,
                     "push_note": push_note}
 
         if merge_mode != "main":
@@ -130,7 +136,8 @@ class GitPublishNode(Node):
         if not pushed:
             return {"pushed": False, "merged": False, "push_note": push_note,
                     "note": f"分支推送失败，未合并 {base_branch}：{push_note}"}
-        return {**self._merge_to_main(str(execution.evaluate(self.main_clone)), branch, base_branch), "pushed": True,
+        return {**self._merge_to_main(str(execution.evaluate(self.main_clone)), branch,
+                                      base_branch, env=env), "pushed": True,
                 "push_note": push_note}
 
     # -- 内部 ---------------------------------------------------------------
@@ -158,10 +165,14 @@ class GitPublishNode(Node):
         out = lr.stdout.strip()
         return out.split("\t")[0] if out else None
 
-    def _merge_to_main(self, main_clone: str, branch: str, base_branch: str = "main") -> dict:
+    def _merge_to_main(self, main_clone: str, branch: str, base_branch: str = "main",
+                       env=None) -> dict:
+        # env 缺省也不能回退宿主全量环境（防未来调用方漏传）。
+        env = build_git_env() if env is None else env
+
         def sh(args, t=None):
             return subprocess.run(args, cwd=main_clone, capture_output=True, text=True,
-                                  timeout=t or self.timeout_secs)
+                                  timeout=t or self.timeout_secs, env=env)
 
         sh(["git", "fetch", "origin"])
         r1 = sh(["git", "merge", "--ff-only", f"origin/{branch}"])
@@ -174,11 +185,14 @@ class GitPublishNode(Node):
             return {"merged": True, "note": f"已 ff 合并推送 {base_branch}"}
         return {"merged": False, "note": f"合并成功但推送 {base_branch} 失败"}
 
-    def _create_pr(self, wt: str, branch: str, base_branch: str, title: str) -> dict:
+    def _create_pr(self, wt: str, branch: str, base_branch: str, title: str,
+                   env=None) -> dict:
         """推分支后开 PR（pr 模式）。PR 已存在不算失败——如实记 note。"""
+        env = build_git_env() if env is None else env
+
         def sh(args, t=None):
             return subprocess.run(args, cwd=wt, capture_output=True, text=True,
-                                  timeout=t or self.timeout_secs)
+                                  timeout=t or self.timeout_secs, env=env)
 
         title = (title or f"merge {branch}").splitlines()[0][:120]
         body = f"Automated by issue-pipeline (branch {branch})."
