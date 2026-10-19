@@ -92,7 +92,9 @@ pre-fix 输出原文见 `docs/proofs/data/19-negative-control.txt`（pytest 负�
    不得出现「agent 存活 + 锁不存在」；修后 agent 死、preflight 返回 clean；
 3. `test_unkillable_agent_keeps_lock_and_preflight_refuses`：模拟收尾无法
    确认终态（`_terminate_stream_process` → `False`）→ 锁保留、agent 存活，
-   `preflight_workspace` 抛 `AgentRunError`（不杀不放行）；
+   `preflight_workspace` 抛 `AgentRunError`（不杀不放行）；身份探测桩化
+   （Linux `ps` 会按 80 列截断长命令行，桩脚本 basename 可能落在截断外，
+   与生产短命令名不同）；
 4. `test_normal_completion_releases_lock_without_kill`：正常完成不调用
    `_kill_process_group`，锁按原语义释放。
 

@@ -244,6 +244,12 @@ class TestConsumerCloseTerminatesAgent:
 
         monkeypatch.setattr(agent_run_mod, "_terminate_stream_process",
                             _pretend_kill_failed)
+        # CI 的 ps 按终端宽度截断长命令行（Linux 默认 80 列），桩脚本 basename
+        # 可能落在截断之外 → agentproc 身份核实失败判 stale 并删锁。这里桩掉
+        # 身份探测，聚焦本仓契约：锁保留 + agent 存活 ⇒ preflight 必须拒绝。
+        from agentproc import run_lock as agentproc_run_lock
+        monkeypatch.setattr(agentproc_run_lock, "_ps_fields",
+                            lambda pid: (str(pid), "stub-rec-stuck.sh"))
 
         gen = recursive_stream_turn(
             "hi", workspace=str(tmp_path), profile="rec-stuck",
