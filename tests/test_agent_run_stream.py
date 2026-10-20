@@ -24,6 +24,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -338,6 +339,36 @@ class TestWatchdogThreadLifecycle:
             f"3 个正常完成的短 turn 后仍有 {len(alive) - baseline} 条 "
             "_enforce_deadline 线程存活（会一直睡到 timeout_secs=60）")
 
+    def test_early_close_reaps_watchdog_thread(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        """A2R11-06 余量：提前 close（SSE 断连）同样不得滞留看门狗。
+
+        正常完成路径已由 Event 唤醒；close 路径经 GeneratorExit 进入同一
+        ``finally``，这里钉住它（旧实现只修了正常完成也会在 close 后残留）。
+        """
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        stub = agent_config_repo / "stub-watchdog-close.sh"
+        stub.write_text("#!/bin/sh\necho started\nsleep 30\n")
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-watchdog-close")
+
+        baseline = len(_watchdog_threads())
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-watchdog-close",
+            timeout_secs=60, run_key="t-watchdog-close")
+        try:
+            assert next(gen) == {"type": "line", "text": "started"}
+        finally:
+            gen.close()
+
+        deadline = time.time() + 2
+        while time.time() < deadline and len(_watchdog_threads()) > baseline:
+            time.sleep(0.02)
+        alive = _watchdog_threads()
+        assert len(alive) == baseline, (
+            f"提前 close 后仍有 {len(alive) - baseline} 条 _enforce_deadline "
+            "线程存活（daemon 线程会一直持有 proc 引用到 deadline）")
+
 
 class TestLockWriteFailureCleanup:
     """A2R12-03：Popen 成功后写遗言锁失败必须回收已 spawn 的 agent。
@@ -383,6 +414,60 @@ class TestLockWriteFailureCleanup:
             proc = spawned[0]
             assert proc.poll() is not None, (
                 "写锁失败后已 spawn 的 agent 必须被终止并回收（否则是无锁孤儿）")
+            assert not lock_file.exists(), "写锁失败不得留下锁文件"
+        finally:
+            for proc in spawned:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:  # noqa: BLE001 — 清理不掩盖断言失败
+                        pass
+            lock_file.unlink(missing_ok=True)
+
+    def test_best_effort_lock_failure_also_reaps_agent(
+            self, agent_config_repo, tmp_path, monkeypatch):
+        """A2R8-07 余量：``write_run_lock`` 对 OSError 返回 None（不是抛）。
+
+        磁盘满/权限失败走的是 best-effort 返回 None 的分支；只捕获异常
+        会让 agent 无锁继续跑。这里把 None 也当写锁失败：杀组、清锁、抛出。
+        """
+        monkeypatch.setenv("AGENTPROC_RUN_LOCK_DIR", str(tmp_path / "run-locks"))
+        stub = agent_config_repo / "stub-lock-none.sh"
+        stub.write_text("#!/bin/sh\necho started\nsleep 30\n")
+        stub.chmod(0o755)
+        _register_stub_agent(agent_config_repo, stub, "rec-lock-none")
+
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def recording_popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        monkeypatch.setattr(agent_run_mod.subprocess, "Popen", recording_popen)
+
+        from agentproc import run_lock as agentproc_run_lock
+
+        monkeypatch.setattr(agentproc_run_lock, "write_run_lock",
+                            lambda *args, **kwargs: None)
+        lock_key = _run_lock_key(os.path.abspath(str(tmp_path)), "t-lock-none")
+        lock_file = lock_path_for(lock_key)
+
+        gen = recursive_stream_turn(
+            "hi", workspace=str(tmp_path), profile="rec-lock-none",
+            timeout_secs=60, run_key="t-lock-none")
+        try:
+            with pytest.raises(AgentRunError, match="遗言锁写入失败"):
+                next(gen)
+            assert spawned, "Popen 应在写锁前成功"
+            proc = spawned[0]
+            assert proc.poll() is not None, (
+                "best-effort 写锁失败后已 spawn 的 agent 必须被终止并回收")
             assert not lock_file.exists(), "写锁失败不得留下锁文件"
         finally:
             for proc in spawned:

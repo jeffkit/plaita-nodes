@@ -355,8 +355,14 @@ def _provider_jevlike(*, question: Any, choices: list[dict], input: Any, items: 
     probs = probs[:len(states)]
 
     def _one(p: list) -> tuple[str, float]:
+        # A2R8-08 余量：softmax 权重为 NaN/±inf 时 float(p[best]) 会原样
+        # 冒充置信度（节点层 _checked 会拒，但 provider 注册表可直接调用）。
+        # 与 llm/jev 同口径，在 provider 边界就用 _confidence 校验。
+        if len(p) != len(choices):
+            raise DecisionError(
+                f"jevlike 输出维度 {len(p)} 与决策空间 {len(choices)} 不一致")
         best = max(range(len(choices)), key=lambda i: p[i])
-        return choices[best]["value"], float(p[best])
+        return choices[best]["value"], _confidence(p[best])
 
     if items is not None:
         results = []

@@ -1,0 +1,21 @@
+### PRE-FIX (仅回退两个生产文件，保留新测试)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE DecisionError
+
+tests/test_decision.py:319: Failed
+=========================== short test summary info ============================
+FAILED tests/test_agent_run_stream.py::TestLockWriteFailureCleanup::test_best_effort_lock_failure_also_reaps_agent
+FAILED tests/test_decision.py::test_jevlike_provider_rejects_non_finite_confidence[probs0]
+FAILED tests/test_decision.py::test_jevlike_provider_rejects_non_finite_confidence[probs1]
+FAILED tests/test_decision.py::test_jevlike_provider_rejects_non_finite_confidence[probs2]
+FAILED tests/test_decision.py::test_jevlike_provider_rejects_non_finite_confidence[probs3]
+FAILED tests/test_decision.py::test_jevlike_provider_rejects_non_finite_confidence[probs4]
+6 failed, 2 passed in 0.86s
+
+### POST-FIX (定向)
+...............s....................s...................                 [100%]
+54 passed, 2 skipped in 12.50s
+
+### FULL SUITE
+.................................                                        [100%]
+391 passed, 2 skipped in 55.22s

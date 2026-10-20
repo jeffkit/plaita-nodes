@@ -1,8 +1,11 @@
 """DecisionNode：决策空间归一 + llm/jev provider + 置信度门控 + dry-run + 构建期校验。"""
 from __future__ import annotations
 
+import contextlib
 import json
+import sys
 import threading
+import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -247,6 +250,97 @@ def test_jevlike_checkpoint_missing():
                         model="/nonexistent.pt")
     with pytest.raises(DecisionError, match="checkpoint 不存在"):
         node.execute(FakeExecution())
+
+
+class _FakeTensor:
+    """只实现 ``_provider_jevlike`` 用到的 softmax/cpu/tolist 形状。"""
+
+    def __init__(self, values):
+        self._values = values
+
+    def softmax(self, *args, **kwargs):
+        return self
+
+    def cpu(self):
+        return self
+
+    def tolist(self):
+        return self._values
+
+
+def _install_fake_jevlike(monkeypatch, probs):
+    """注入最小 torch/jevlike 模块（无需真实 torch/checkpoint）。"""
+
+    class ChoiceExample:
+        def __init__(self, text, choices, label):
+            self.text, self.choices, self.label = text, choices, label
+
+    class _Net:
+        def eval(self):
+            pass
+
+        def __call__(self, batch):
+            return _FakeTensor(probs)
+
+    data_mod = types.ModuleType("jevlike.data")
+    data_mod.ChoiceExample = ChoiceExample
+    model_mod = types.ModuleType("jevlike.model")
+    model_mod.load_checkpoint = lambda checkpoint, device: (
+        _Net(), lambda xs: xs, {})
+    model_mod.select_device = lambda spec: "cpu"
+    train_mod = types.ModuleType("jevlike.train")
+    train_mod.move = lambda batch, device: batch
+    torch_mod = types.ModuleType("torch")
+    torch_mod.no_grad = contextlib.nullcontext
+    jevlike_mod = types.ModuleType("jevlike")
+    for name, mod in (
+        ("torch", torch_mod), ("jevlike", jevlike_mod),
+        ("jevlike.data", data_mod), ("jevlike.model", model_mod),
+        ("jevlike.train", train_mod),
+    ):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+
+@pytest.mark.parametrize("probs", [
+    [float("nan"), 0.0],
+    [float("inf"), 0.0],
+    [float("-inf"), float("-inf")],
+    [-0.1, -0.2],
+    [1.1, 0.2],
+])
+def test_jevlike_provider_rejects_non_finite_confidence(
+        monkeypatch, tmp_path, probs):
+    """A2R8-08 余量：jevlike 直接调用（不经节点 _checked）也不得放行坏置信度。"""
+    from plaita_nodes.decision import _provider_jevlike
+
+    checkpoint = tmp_path / "model-bad.pt"
+    checkpoint.write_bytes(b"fake")
+    _install_fake_jevlike(monkeypatch, [probs])
+    with pytest.raises(DecisionError, match="confidence"):
+        _provider_jevlike(
+            question=None,
+            choices=[{"value": "a", "description": None},
+                     {"value": "b", "description": None}],
+            input="x", items=None, api_base=None, api_key=None,
+            model=str(checkpoint), timeout_secs=1,
+        )
+
+
+def test_jevlike_provider_accepts_finite_confidence(monkeypatch, tmp_path):
+    from plaita_nodes.decision import _provider_jevlike
+
+    checkpoint = tmp_path / "model-ok.pt"
+    checkpoint.write_bytes(b"fake")
+    _install_fake_jevlike(monkeypatch, [[0.2, 0.8]])
+    out = _provider_jevlike(
+        question=None,
+        choices=[{"value": "a", "description": None},
+                 {"value": "b", "description": None}],
+        input="x", items=None, api_base=None, api_key=None,
+        model=str(checkpoint), timeout_secs=1,
+    )
+    assert out["choice"] == "b"
+    assert out["confidence"] == 0.8
 
 
 def test_llm_provider_batch(openai_stub):

@@ -939,7 +939,15 @@ def recursive_stream_turn(task: str, *, workspace: str, profile: str = "glm-52",
                                 text=True, cwd=workspace, env=proc_env,
                                 start_new_session=True)
         try:
-            _run_lock.write_run_lock(lock_key, proc.pid, argv)
+            lock_path = _run_lock.write_run_lock(lock_key, proc.pid, argv)
+            if lock_path is None:
+                # A2R8-07 余量：write_run_lock 对 OSError（磁盘满/权限）是
+                # best-effort 返回 None（agentproc.run_lock 契约）。只捕获
+                # 异常会漏掉这条真实故障路径——agent 会无锁继续跑，成为
+                # 下一次 preflight 看不见的孤儿。这里显式升级为写锁失败。
+                raise AgentRunError(
+                    "流式 agent 遗言锁写入失败（write_run_lock 返回 None："
+                    "磁盘满/权限/锁目录不可写）")
         except BaseException:
             # A2R12-03：Popen 已成功但写锁失败（磁盘满/权限/注入异常）时，
             # 旧实现的 finally 尚未建立 → agent 继续跑且没有遗言锁，成为
