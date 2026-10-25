@@ -38,12 +38,13 @@ class HitlAwaitNode(Node):
 
     node_type: ClassVar[str] = "hitl_await"
     node_name: ClassVar[str] = "人工确认(挂起)"
-    is_suspending: ClassVar[bool] = True
-    # 执行能力声明（plaita#330 §4 注册期不变量 / #331 词表）：本节点继承裸
-    # Node（非 EventNode），曾是「is_suspending ⇒ requirements 非空」不变量的
-    # 唯一漏网。结构性半边 = 事件总线（外部 poller 发布 hitl_reply 事件唤醒
-    # 恢复）；hitl 服务可达性是运行期事实，不进 token 词表。
-    execution_requirements: ClassVar[tuple] = ("suspend:root", "event_bus")
+    # 执行台阶声明（两语义终版，plaita fb36f085）：本节点继承裸 Node（非
+    # EventNode），曾是「is_suspending ⇒ requirements 非空」不变量的唯一漏网
+    # （#330 时代以 execution_requirements 声明，legacy 折算兼容至今）——现
+    # 迁台阶单一声明：会挂起、经事件总线唤醒（外部 poller 发布 hitl_reply
+    # 事件恢复）；is_suspending 由 __init_subclass__ 据此推导，不再手写。
+    # hitl 服务可达性是运行期事实，不进台阶词汇。
+    execution_tier: ClassVar[str] = "managed"
 
     message: Optional[Any] = None
     images: Optional[Any] = None
